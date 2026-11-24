@@ -84,10 +84,30 @@ def header(cols, fresh):
     if not out.strip():                                       # fastfetch missing: the logo alone
         with open(logo, encoding="utf-8") as f:
             out = C_ACC + f.read().replace("$1", "") + C_DIM + " (install fastfetch for system facts)\n"
-    lines = out.rstrip("\n").split("\n")
+    lines = [fill_jumps(l) for l in out.rstrip("\n").split("\n")]
     while lines and not lines[-1].replace("\x1b[m", "").replace("\x1b[0m", "").strip():
         lines.pop()
     return lines
+
+
+def fill_jumps(line):
+    """fastfetch reaches the value column with ESC[<n>G. That jump skips cells without clearing
+    them, so text an earlier frame left there would show between key and value. Spaces instead."""
+    out, pos = "", 0
+    while True:
+        i = line.find("\x1b[", pos)
+        if i < 0:
+            return out + line[pos:]
+        j = i + 2
+        while j < len(line) and line[j].isdigit():
+            j += 1
+        out += line[pos:i]
+        if j > i + 2 and j < len(line) and line[j] == "G":
+            out += " " * max(0, int(line[i + 2:j]) - 1 - visible_len(out))
+            pos = j + 1
+        else:
+            out += line[i:j]
+            pos = j
 
 
 # ---------------------------------------------------------------- clock

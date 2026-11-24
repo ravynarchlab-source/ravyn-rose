@@ -72,6 +72,13 @@ def header(cols, fresh):
     """fresh=False: use the copy `rice` rendered when the flavour was applied (first frame).
     fresh=True: ask fastfetch again, so uptime and memory stay current."""
     small = cols < 64                                         # narrow tile: short logo on top of the facts
+    lines = header_lines(small, fresh)
+    if not small and max((visible_len(l) for l in lines), default=0) > cols:
+        lines = header_lines(True, fresh)                     # logo beside the facts would wrap: stack them
+    return lines
+
+
+def header_lines(small, fresh):
     pos = "top" if small else "left"
     cached = os.path.join(TH["dir"], "header-%s.ans" % pos)
     logo = os.path.join(HERE, "logos", TH["name"] + ("-small" if small else "") + ".txt")

@@ -90,8 +90,11 @@ stippled dots, the art drawn in braille, a contour-map wallpaper.
 |---|---|---|---|
 | <a href="assets/paper-desktop.png"><img src="assets/paper-desktop.png" width="330" alt="PAPER desktop"></a> | <a href="assets/paper-terminal.png"><img src="assets/paper-terminal.png" width="200" alt="PAPER terminal showcase"></a> | <a href="assets/paper-music.png"><img src="assets/paper-music.png" width="140" alt="PAPER deck and lyrics bar"></a> | <a href="assets/paper-tablet.png"><img src="assets/paper-tablet.png" width="105" alt="PAPER in portrait"></a> |
 
-The track in these pictures is a generated test tone, the flower is a generated image and
-the wallpapers are drawn by a script. No real album art appears anywhere in this repository.
+The music in these pictures and recordings is "High Technologic Beat Explosion" by
+[Loyalty Freak Music](https://freemusicarchive.org/music/Loyalty_Freak_Music/ROBOT_DANCE_/),
+released under [CC0 1.0](https://creativecommons.org/publicdomain/zero/1.0/). The lines in the
+lyrics bar are demo text written for it, the flower cover is a generated image and the
+wallpapers are drawn by a script. No commercial album art appears anywhere in this repository.
 
 ### Your own
 
@@ -444,7 +447,7 @@ keeps only a couple of seconds of numbers in memory, and sends nothing anywhere.
 Tested on CachyOS with KDE Plasma only. Built and used on one machine: CachyOS, Plasma 6.8,
 Wayland, a 2-in-1 laptop at 1920 x 1080 with 125 % scaling. No other distribution and no other
 desktop has been tried. All five flavours, both layouts, the portrait map and the off-and-restore
-cycle were run there; the tablet pictures above were taken with the screen folded back.
+cycle were run there; the portrait pictures above were taken by rotating the screen.
 
 - **Start-up of the terminal tile.** The showcase draws its first frame less than 100 ms after
   it starts (it logs the figure). The terminal emulator's own start comes on top of that: about
@@ -485,7 +488,7 @@ your distribution or downloaded from their authors, and each keeps its own licen
 | [chafa](https://hpjansson.org/chafa/) | Album art in the showcase | LGPL-3.0-or-later |
 | [cava](https://github.com/karlstav/cava) | The classic layout's visualizer | MIT |
 | [NumPy](https://numpy.org) | The analyser behind the reactive deck | BSD-3-Clause |
-| Loyalty Freak Music, ["ROBOT DANCE !"](https://freemusicarchive.org/music/Loyalty_Freak_Music/ROBOT_DANCE_/) | Music in the demo videos (two tracks) | CC0 1.0 |
+| Loyalty Freak Music, ["ROBOT DANCE !"](https://freemusicarchive.org/music/Loyalty_Freak_Music/ROBOT_DANCE_/) | Music in the screenshots, recordings and demo videos (two tracks) | [CC0 1.0](https://creativecommons.org/publicdomain/zero/1.0/) |
 | [cmatrix](https://github.com/abishekvashok/cmatrix) | Matrix panel | GPL-3.0 |
 | [lavat](https://github.com/AngelJumbo/lavat) | Lava panel | MIT |
 | [pipes.sh](https://github.com/pipeseroni/pipes.sh) | Pipes panel | MIT |

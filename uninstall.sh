@@ -53,6 +53,15 @@ else
   note "not installed"
 fi
 
+step "Pen mode"
+if [ -x "$HOME/.local/share/pen-mode/pen-mode" ]; then
+  note "pen-mode uninstall: puts the apps' own settings back, removes the switch, its shortcut and tray icon"
+  if [ "$PURGE" = 1 ]; then run "$HOME/.local/share/pen-mode/pen-mode" uninstall --purge
+  else run "$HOME/.local/share/pen-mode/pen-mode" uninstall; fi
+else
+  note "not installed"
+fi
+
 step "Putting back what was there before the install"
 if [ -f "$MANIFEST" ]; then
   restored=0

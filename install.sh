@@ -5,6 +5,8 @@
 #   ./install.sh               install packages, copy the files, set up the toggle
 #
 #   --touch       also install the tablet-mode panel service (2-in-1 laptops)
+#   --pen         also install pen mode: a DRAW / NAVIGATE switch for touch-only styluses
+#                 (pen/install.sh installs that module alone)
 #   --no-deps     do not install packages (only report what is missing)
 #   --no-button   do not add the "Rice" button to the panel
 #   --no-setup    copy files only; run `rice setup` yourself later
@@ -14,15 +16,16 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DRY=0; DEPS=1; TOUCH=0; BUTTON=1; SETUP=1
+DRY=0; DEPS=1; TOUCH=0; PEN=0; BUTTON=1; SETUP=1
 for arg in "$@"; do
   case "$arg" in
     --dry-run) DRY=1 ;;
     --touch) TOUCH=1 ;;
+    --pen) PEN=1 ;;
     --no-deps) DEPS=0 ;;
     --no-button) BUTTON=0 ;;
     --no-setup) SETUP=0; BUTTON=0 ;;
-    -h|--help) sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown option: $arg (try --help)" >&2; exit 2 ;;
   esac
 done
@@ -186,6 +189,14 @@ if [ "$TOUCH" = 1 ]; then
   run systemctl --user daemon-reload || true
   run systemctl --user enable --now touch-mode-panel.service \
     || note "could not start it now; run: systemctl --user enable --now touch-mode-panel.service"
+fi
+
+# ---------------------------------------------------------------- pen
+if [ "$PEN" = 1 ]; then
+  pen_args=()
+  [ "$DRY" = 1 ] && pen_args+=(--dry-run)
+  [ "$DEPS" = 0 ] && pen_args+=(--no-deps)
+  "$HERE/pen/install.sh" "${pen_args[@]}" || note "pen mode was not installed (see above); run pen/install.sh again later"
 fi
 
 step "Done"

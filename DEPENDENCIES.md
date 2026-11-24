@@ -46,6 +46,16 @@ every Arch install.
 
 A panel whose program is missing is skipped with a line in the log. The rest still runs.
 
+## Pen mode (`--pen`)
+
+| Package | Why | Found in |
+|---|---|---|
+| `pyside6`, `qt6-declarative` | the tray icon and the on-screen pill | repositories |
+| `layer-shell-qt` | keeps the pill above other windows without taking focus (part of any Plasma install) | repositories |
+| `glib2`, `kconfig`, `qt6-tools` | `gdbus` and `gsettings`, `kwriteconfig6`, D-Bus to Plasma and to the running apps | repositories |
+| `python-pyqt6` | Krita's Python plugins, which the Krita side of the switch is. Only asked for when Krita is installed | repositories |
+| `rnote`, `xournalpp`, `krita` | the apps themselves. Not installed by `install.sh`; a missing one is skipped | repositories |
+
 ## Optional
 
 | Package | For | Found in |

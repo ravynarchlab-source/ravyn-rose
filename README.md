@@ -102,6 +102,8 @@ wallpapers are drawn.
   rearrange themselves.
 - **Tablet-mode panel service** (optional, for 2-in-1 laptops). Makes the Plasma panel and tray
   icons finger-sized while the screen is folded back, and normal again when it is not.
+- **Pen mode** (optional). A DRAW / NAVIGATE switch for touch-only styluses in Rnote, Xournal++
+  and Krita, with stroke smoothing turned on in each. See [Pen & tablet mode](#pen--tablet-mode).
 - **Limits on itself.** Every panel runs in one systemd slice capped at one CPU core and 1.5 GB
   of memory. `rice off` stops that slice and nothing else. Music players are started outside
   it, so turning the rice off never stops your music.
@@ -138,8 +140,9 @@ What the installer does, in order:
 4. Downloads the Monocraft font from its own release page and checks its SHA-256.
 5. Runs `rice setup`: launchers, shortcuts, the resource-limit slice, the panel button.
 
-Options: `--touch` adds the tablet-mode panel service, `--no-deps` leaves packages alone,
-`--no-button` skips the panel button, `--no-setup` only copies files.
+Options: `--touch` adds the tablet-mode panel service, `--pen` adds pen mode for touch-only
+styluses, `--no-deps` leaves packages alone, `--no-button` skips the panel button,
+`--no-setup` only copies files.
 
 It does not turn the rice on. Do that yourself:
 
@@ -203,7 +206,11 @@ rice panels together.
 
 All of these live in `~/.local/share/rice` after install.
 
-## Tablet mode
+## Pen & tablet mode
+
+Two optional parts for 2-in-1 laptops. Neither needs the rice to be on.
+
+### Tablet-mode panel
 
 `./install.sh --touch` adds a small user service, `touch-mode-panel`. It listens for KWin's
 tablet-mode signal. When the screen folds back, the panel grows to 52 px and tray icons scale
@@ -215,6 +222,72 @@ touch-mode-panel status
 systemctl --user disable --now touch-mode-panel.service
 ```
 
+### Pen mode
+
+`./install.sh --pen` adds a DRAW / NAVIGATE switch for Rnote, Xournal++ and Krita.
+`pen/install.sh` installs this part alone and leaves the rice out of it.
+
+**Which pens it is for.** Touch-only styluses: the capacitive kind sold as "universal" or "for
+all tablets", with or without a battery. The screen reads their tip as a fingertip. It was
+built with one of those on a laptop whose screen would also take a real Wacom AES pen.
+
+**What it cannot give you.** No pressure. No tilt, hover, eraser end or side buttons either.
+None of that leaves a capacitive stylus, so no setting can add it: lines come out one width.
+If your pen is a real active pen for your screen (Wacom AES, MPP, USI), you do not need this;
+apps already tell such a pen from your hand. Not sure which kind you have? Run
+`python3 ~/.local/share/pen-mode/pen-probe.py ~/pen-probe` and scribble: blue lines mean a
+real pen, orange lines mean touch.
+
+Because a touch stylus and a finger look the same, an app cannot know whether a stroke should
+draw or scroll. The switch decides it for all three apps at once:
+
+![the pill at the top switching between DRAW and NAVIGATE in Xournal++](assets/pen-toggle.gif)
+
+- one tap on the pill at the top centre of the screen. It is there while one of the three
+  apps is running, says DRAW or NAVIGATE, and never takes keyboard focus;
+- one tap on the tray icon (a pencil for DRAW, a four-way arrow for NAVIGATE);
+- `Meta+Alt+D`;
+- or `pen-mode draw`, `pen-mode navigate`, `pen-mode toggle` in a terminal.
+
+A short on-screen message names the new mode. Apps that are open follow at once, apps that
+are closed start in the current mode. `PEN_MODE_PILL=0` in the service turns the pill off if
+the tray icon is enough for you.
+
+| App | DRAW | NAVIGATE | Smoothing that setup turns on |
+|---|---|---|---|
+| Xournal++ | one finger draws; two fingers still pan and pinch-zoom | one finger scrolls | stabilizer: Gaussian averaging with inertia |
+| Rnote | one finger draws; two-finger gestures only scribble here, so switch to NAVIGATE to move | one finger pans, two fingers pan and zoom | the "modeled" stroke builder, constant width |
+| Krita | one finger paints; two fingers pan, zoom and rotate | the pan tool: one finger moves the canvas | brush stabilizer |
+
+The same shaky test strokes, drawn by a simulated touchscreen after setup (`pen/tools/vtouch.py`):
+
+![test page in Xournal++](assets/pen-xournalpp.png)
+![test page in Rnote](assets/pen-rnote.png)
+
+Two things about Krita. Its side of the switch is a small Python plugin, and Krita's Python
+plugins need the `python-pyqt6` package. And through XWayland Krita now and then misses the
+end of a touch stroke and stops painting until you change tool, so setup adds a second
+launcher, "Krita (touch pen)", which starts it as a native Wayland app; there the strokes
+all landed.
+
+**Palm rejection is the weak point.** The touch panel this was built on reports no contact
+size, so nothing can filter "big contact = hand". Its firmware seems to ignore a palm laid
+flat: in the one test made, a sentence written with the hand resting on the glass produced no
+stray contact. A
+knuckle or the edge of the hand can still get through, and then Xournal++ cancels the stroke
+and may zoom, Rnote joins the two contacts into a scribble, and Krita zooms or turns the
+canvas. What helps: rest the whole hand or none of it, wear a two-finger drawing glove, and
+keep undo close.
+
+```sh
+pen-mode status       # mode, and what each app is set to
+pen-mode uninstall    # put the apps' own settings back, remove the switch
+```
+
+Setup changes a handful of settings in the three apps and saves the values it found in
+`~/.local/state/pen-mode/originals.json` first. `pen-mode uninstall` writes exactly those
+values back. Close the three apps before either step: they write their settings on exit.
+
 ## Uninstall
 
 ```sh
@@ -224,8 +297,9 @@ systemctl --user disable --now touch-mode-panel.service
 
 This runs `rice off` first, so your look is restored from the toggle's own byte-exact copy.
 Then it removes the files, launchers and shortcuts, and copies back anything that existed
-before the install. Packages stay installed. The backup folder stays too, until you delete it
-or pass `--purge`.
+before the install. If pen mode is installed, its own uninstall runs as well and writes the
+three apps' settings back to what they were. Packages stay installed. The backup folder stays
+too, until you delete it or pass `--purge`.
 
 ## What it sends over the network
 
@@ -251,6 +325,12 @@ cycle were run there; the tablet pictures above were taken with the screen folde
 - **The installer** has been run as a dry run and into an empty home folder, then uninstalled
   again with the earlier files coming back. It has not yet been run on a freshly installed
   system, so read the dry run before you trust it.
+- **Pen mode** was installed for real on that laptop, and into an empty home folder and
+  removed again, with the app settings coming back identical. Drawing, two-finger pan, pinch
+  and the switch (pill, shortcut, command) were checked in all three apps with a simulated
+  touchscreen and keyboard (`pen/tools/vtouch.py`); in Krita that was as a native Wayland app, where NAVIGATE picked the
+  pan tool and DRAW gave the brush back. One real capacitive stylus was used by hand in
+  Xournal++ and in the probe. It has not been used in Krita yet.
 - Multi-monitor setups and X11 are untested.
 
 ## Credits
@@ -279,6 +359,7 @@ your distribution or downloaded from their authors, and each keeps its own licen
 | [Pillow](https://python-pillow.org) | Preparing cover art for the shader | MIT-CMU |
 | [KDE Plasma, KWin, Breeze](https://kde.org/plasma-desktop/) | The desktop all of this sits on | LGPL-2.0-or-later |
 | [PipeWire](https://pipewire.org) and WirePlumber | Volume control | MIT |
+| [Rnote](https://rnote.flxzt.net), [Xournal++](https://xournalpp.github.io), [Krita](https://krita.org) | The apps pen mode sets up and switches | GPL-3.0-or-later, GPL-2.0-or-later, GPL-3.0 |
 
 ## Licence
 

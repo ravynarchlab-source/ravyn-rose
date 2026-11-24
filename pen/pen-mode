@@ -1,0 +1,435 @@
+#!/usr/bin/env python3
+"""pen-mode: one switch for touch-only (capacitive) styluses in Rnote, Xournal++ and Krita.
+
+A capacitive stylus looks like a fingertip to the computer, so an app cannot tell "draw" from
+"scroll". This switch decides it for all three apps at once:
+
+  pen-mode draw        touch draws
+  pen-mode navigate    touch moves the page (one finger pans, two fingers pan and zoom)
+  pen-mode toggle      the other one (tray icon and Meta+Alt+D do this)
+  pen-mode status      current mode and what each app is set to
+
+  pen-mode setup       turn touch drawing and stroke smoothing on in the three apps (the values
+                       found are saved first), add the shortcut, start the tray icon
+  pen-mode uninstall   put the saved values back and remove everything this installed
+                       (--purge also deletes the saved values and backups)
+
+Running apps follow at once: Rnote and Xournal++ over D-Bus, Krita through its "Pen mode" plugin.
+Apps that are closed start in the current mode.
+"""
+import ast
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+HOME = Path.home()
+CONFIG = Path(os.environ.get("XDG_CONFIG_HOME") or HOME / ".config")
+DATA = Path(os.environ.get("XDG_DATA_HOME") or HOME / ".local/share")
+STATE = Path(os.environ.get("XDG_STATE_HOME") or HOME / ".local/state") / "pen-mode"
+MODE_FILE = STATE / "mode"
+ORIGINALS = STATE / "originals.json"
+BACKUP = STATE / "backup"
+LOG = STATE / "log"
+SHARE = DATA / "pen-mode"
+BIN = HOME / ".local/bin/pen-mode"
+UNIT = CONFIG / "systemd/user/pen-mode-tray.service"
+DESKTOP = DATA / "applications/pen-mode-toggle.desktop"
+KRITA_LAUNCHER = DATA / "applications/krita-touch-pen.desktop"
+XOURNAL = CONFIG / "xournalpp/settings.xml"
+PYKRITA = DATA / "krita/pykrita"
+
+RNOTE = "com.github.flxzt.rnote"
+SHORTCUT = 0x10000000 | 0x08000000 | 0x44          # Meta+Alt+D as a Qt key code
+SHORTCUT_TEXT = "Meta+Alt+D"
+ACTION = ["pen-mode-toggle.desktop", "_launch", "Pen mode", "Switch DRAW / NAVIGATE"]
+
+# What setup changes. Xournal++: averaging 2 = velocity-based Gaussian, preprocessor 2 = inertia.
+XOURNAL_WANT = {"touchDrawing": "true", "stabilizerAveragingMethod": "2", "stabilizerPreprocessor": "2"}
+# Krita: touchPainting 1 = enabled, LineSmoothingType 3 = stabilizer, short window, no dead-zone delay.
+KRITA_WANT = {"touchPainting": "1", "LineSmoothingType": "3", "LineSmoothingDistanceMin": "18",
+              "LineSmoothingDistanceMax": "18", "LineSmoothingUseDelayDistance": "false",
+              "LineSmoothingFinishStabilizedCurve": "true", "LineSmoothingStabilizeSensors": "true"}
+ABSENT = "__absent__"
+
+
+def sh(*args, timeout=4):
+    try:
+        r = subprocess.run([str(a) for a in args], capture_output=True, text=True, timeout=timeout)
+        return r.returncode, r.stdout.strip()
+    except (OSError, subprocess.TimeoutExpired):
+        return 1, ""
+
+
+def have(cmd):
+    return shutil.which(cmd) is not None
+
+
+def log(msg):
+    STATE.mkdir(parents=True, exist_ok=True)
+    with open(LOG, "a") as f:
+        f.write(time.strftime("%F %T ") + msg + "\n")
+
+
+def say(msg):
+    print("   " + msg)
+
+
+def running(name):
+    return sh("pgrep", "-x", name)[0] == 0
+
+
+def gdbus(dest, path, method, *args, timeout=2):
+    return sh("gdbus", "call", "--session", "--dest", dest, "--object-path", path, "--timeout", str(timeout),
+              "--method", method, *args, timeout=timeout + 1)
+
+
+# ---------------------------------------------------------------- mode
+def read_mode():
+    try:
+        m = MODE_FILE.read_text().strip()
+    except OSError:
+        m = ""
+    return m if m in ("draw", "navigate") else "draw"
+
+
+def rnote_has_schema():
+    return have("gsettings") and RNOTE in sh("gsettings", "list-schemas")[1].split()
+
+
+def rnote_mode(draw):
+    if not rnote_has_schema():
+        return "not installed"
+    flag = "true" if draw else "false"
+    sh("gsettings", "set", RNOTE, "touch-drawing", flag)                # what a closed Rnote starts with
+    if "true" not in gdbus("org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus.NameHasOwner", RNOTE)[1]:
+        return "closed, starts in this mode"
+    done = 0
+    for w in range(1, 13):                                              # every open window
+        rc, _ = gdbus(RNOTE, f"/com/github/flxzt/rnote/window/{w}", "org.gtk.Actions.SetState",
+                      "touch-drawing", f"<{flag}>", "{}", timeout=1)
+        done += rc == 0
+    return f"switched live ({done} window{'s' if done != 1 else ''})"
+
+
+def xournal_set(values):
+    """Rewrite <property name=K value=V/> entries in settings.xml. Returns the values found before."""
+    text = XOURNAL.read_text()
+    before = {}
+    for key, new in values.items():
+        m = re.search(r'(<property name="%s" value=")([^"]*)(")' % re.escape(key), text)
+        if not m:
+            continue
+        before[key] = m.group(2)
+        text = text[:m.start(2)] + new + text[m.end(2):]
+    tmp = XOURNAL.with_suffix(".xml.pen-mode-tmp")
+    tmp.write_text(text)
+    tmp.replace(XOURNAL)
+    return before
+
+
+def xournal_mode(draw):
+    flag = "true" if draw else "false"
+    rc, pids = sh("pgrep", "-x", "xournalpp")
+    if rc != 0:
+        if not XOURNAL.exists():
+            return "no settings file yet"
+        xournal_set({"touchDrawing": flag})
+        return "closed, starts in this mode"
+    pids = set(pids.split())
+    # Xournal++ has no bus name of its own. Each process holds a few connections and one of them
+    # carries the window actions; the others never answer, so ask all at once and stop waiting for
+    # a process as soon as one of its connections has confirmed.
+    calls = {}
+    for line in sh("busctl", "--user", "list", "--no-legend")[1].splitlines():
+        f = line.split()
+        if len(f) > 1 and f[1] in pids and f[0].startswith(":"):
+            calls.setdefault(f[1], []).append(subprocess.Popen(
+                ["gdbus", "call", "--session", "--dest", f[0], "--object-path",
+                 "/com/github/xournalpp/xournalpp/window/1", "--timeout", "2", "--method",
+                 "org.gtk.Actions.SetState", "toggle-touch-drawing", f"<{flag}>", "{}"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+    done = set()
+    deadline = time.monotonic() + 2.5
+    while time.monotonic() < deadline and len(done) < len(calls):
+        for pid, procs in calls.items():
+            if pid not in done and any(p.poll() == 0 for p in procs):
+                done.add(pid)
+        if all(pid in done or all(p.poll() is not None for p in procs) for pid, procs in calls.items()):
+            break
+        time.sleep(0.02)
+    for procs in calls.values():
+        for p in procs:
+            if p.poll() is None:
+                p.kill()
+    n = len(done)
+    return f"switched live ({n} window{'s' if n != 1 else ''})" if n else "running, but it did not answer"
+
+
+def krita_state():
+    if not (PYKRITA / "penmode.desktop").exists():
+        return "plugin not installed"
+    enabled = sh("kreadconfig6", "--file", "kritarc", "--group", "python", "--key", "enable_penmode")[1] == "true"
+    if not enabled:
+        return "plugin installed but not enabled"
+    return "follows through its plugin" if running("krita") else "closed, starts in this mode"
+
+
+def osd(mode):
+    icon, text = (("draw-freehand", "Pen: DRAW  ·  touch draws") if mode == "draw"
+                  else ("transform-browse", "Pen: NAVIGATE  ·  touch moves the page"))
+    gdbus("org.kde.plasmashell", "/org/kde/osdService", "org.kde.osdService.showText", icon, text, timeout=1)
+
+
+def set_mode(mode, quiet=False):
+    STATE.mkdir(parents=True, exist_ok=True)
+    tmp = STATE / "mode.tmp"
+    tmp.write_text(mode + "\n")
+    tmp.replace(MODE_FILE)                       # the tray icon and the Krita plugin watch this file
+    if not quiet:
+        osd(mode)
+    draw = mode == "draw"
+    result = {"rnote": rnote_mode(draw), "xournalpp": xournal_mode(draw), "krita": krita_state()}
+    log(f"mode {mode}: " + "; ".join(f"{k}: {v}" for k, v in result.items()))
+    return result
+
+
+def status():
+    mode = read_mode()
+    print(f"pen mode: {mode.upper()}  ({'touch draws' if mode == 'draw' else 'touch moves the page'})")
+    rn = sh("gsettings", "get", RNOTE, "touch-drawing")[1] if rnote_has_schema() else "not installed"
+    print(f"  rnote      touch-drawing={rn}  {'(running)' if running('rnote') else '(closed)'}")
+    if XOURNAL.exists():
+        vals = {k: (re.search(r'name="%s" value="([^"]*)"' % k, XOURNAL.read_text()) or [None, "?"])[1] for k in XOURNAL_WANT}
+        print("  xournal++  " + " ".join(f"{k}={v}" for k, v in vals.items()) + f"  {'(running)' if running('xournalpp') else '(closed)'}")
+    else:
+        print("  xournal++  no settings file yet")
+    kv = {k: kread(k) for k in ("touchPainting", "LineSmoothingType")}
+    print("  krita      " + " ".join(f"{k}={v}" for k, v in kv.items()) + f"  plugin: {krita_state()}")
+    print(f"  tray       {sh('systemctl', '--user', 'is-active', 'pen-mode-tray.service')[1] or 'unknown'}")
+    owner = gdbus("org.kde.kglobalaccel", "/kglobalaccel", "org.kde.KGlobalAccel.actionList", f"([{SHORTCUT},0,0,0],)")[1]
+    print(f"  shortcut   {SHORTCUT_TEXT} {'set' if ACTION[0] in owner else 'not set'}")
+    if LOG.exists():
+        print("  last: " + LOG.read_text().strip().splitlines()[-1])
+
+
+# ---------------------------------------------------------------- setup / uninstall
+def kread(key, group="<default>"):
+    return sh("kreadconfig6", "--file", "kritarc", "--group", group, "--key", key, "--default", ABSENT)[1]
+
+
+def kwrite(key, value, group="<default>"):
+    if value == ABSENT:
+        sh("kwriteconfig6", "--file", "kritarc", "--group", group, "--key", key, "--delete")
+    else:
+        sh("kwriteconfig6", "--file", "kritarc", "--group", group, "--key", key, value)
+
+
+def rnote_engine():
+    """Rnote keeps its pen settings as one JSON string in GSettings."""
+    rc, out = sh("gsettings", "get", RNOTE, "engine-config")
+    try:
+        return json.loads(ast.literal_eval(out)) if rc == 0 and out else None
+    except (ValueError, SyntaxError):
+        return None
+
+
+def rnote_engine_write(cfg):
+    sh("gsettings", "set", RNOTE, "engine-config", repr(json.dumps(cfg, separators=(",", ":"))))
+
+
+def load_originals():
+    try:
+        return json.loads(ORIGINALS.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def busy_apps():
+    return [name for name, proc in (("Rnote", "rnote"), ("Xournal++", "xournalpp"), ("Krita", "krita")) if running(proc)]
+
+
+def setup():
+    busy = busy_apps()
+    if busy:
+        print(f"Close {', '.join(busy)} first: they write their settings back when they exit.", file=sys.stderr)
+        return 1
+    STATE.mkdir(parents=True, exist_ok=True)
+    BACKUP.mkdir(exist_ok=True)
+    orig = load_originals()                       # values from the first setup win; a second run keeps them
+
+    print("== Xournal++")
+    if XOURNAL.exists():
+        if not (BACKUP / "xournalpp-settings.xml").exists():
+            shutil.copy2(XOURNAL, BACKUP / "xournalpp-settings.xml")
+        before = xournal_set(XOURNAL_WANT)
+        orig.setdefault("xournalpp", before)
+        say("touch drawing on, stabilizer: Gaussian averaging + inertia" if before else "settings file has none of the expected entries")
+    else:
+        say("no settings file yet: start Xournal++ once, close it, and run 'pen-mode setup' again")
+
+    print("== Rnote")
+    if rnote_has_schema():
+        if not (BACKUP / "rnote.dconf").exists() and have("dconf"):
+            (BACKUP / "rnote.dconf").write_text(sh("dconf", "dump", "/com/github/flxzt/rnote/")[1] + "\n")
+        before = {"touch-drawing": sh("gsettings", "get", RNOTE, "touch-drawing")[1]}
+        sh("gsettings", "set", RNOTE, "touch-drawing", "true")
+        cfg = rnote_engine()
+        try:
+            brush = cfg["pens_config"]["brush_config"]
+            before["builder_type"] = brush["builder_type"]
+            before["pressure_curve"] = brush["solid_options"]["pressure_curve"]
+            brush["builder_type"] = "modeled"                       # the smoothing stroke builder
+            brush["solid_options"]["pressure_curve"] = "const"      # even width: there is no pressure to read
+            rnote_engine_write(cfg)
+            say("touch drawing on, brush: modeled (smoothed) strokes with an even width")
+        except (TypeError, KeyError):
+            say("touch drawing on; brush settings not found (start Rnote once, close it, run setup again)")
+        orig.setdefault("rnote", before)
+    else:
+        say("not installed: skipped")
+
+    print("== Krita")
+    if have("krita") and have("kwriteconfig6"):
+        if (CONFIG / "kritarc").exists() and not (BACKUP / "kritarc").exists():
+            shutil.copy2(CONFIG / "kritarc", BACKUP / "kritarc")
+        before = {k: kread(k) for k in KRITA_WANT}
+        before["python/enable_penmode"] = kread("enable_penmode", "python")
+        orig.setdefault("krita", before)
+        for k, v in KRITA_WANT.items():
+            kwrite(k, v)
+        PYKRITA.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(SHARE / "krita/penmode.desktop", PYKRITA / "penmode.desktop")
+        shutil.copytree(SHARE / "krita/penmode", PYKRITA / "penmode", dirs_exist_ok=True)
+        kwrite("enable_penmode", "true", "python")
+        say("touch painting on, brush smoothing: stabilizer, plugin 'Pen mode' enabled")
+        # Through XWayland Krita now and then misses the end of a touch stroke and stops painting until the
+        # tool is changed. Started as a native Wayland app it does not, so there is a second launcher for that.
+        KRITA_LAUNCHER.parent.mkdir(parents=True, exist_ok=True)
+        KRITA_LAUNCHER.write_text("[Desktop Entry]\nType=Application\nName=Krita (touch pen)\n"
+                                  "Comment=Krita as a native Wayland app, so touch strokes are not dropped\n"
+                                  "Exec=env QT_QPA_PLATFORM=wayland krita %F\nIcon=krita\n"
+                                  "Categories=Qt;KDE;Graphics;2DGraphics;RasterGraphics;\nStartupWMClass=krita\n")
+        say("launcher 'Krita (touch pen)' added: starts Krita as a native Wayland app (use it with a touch stylus)")
+        if sh("python3", "-c", "import PyQt6")[0] != 0 and sh("python3", "-c", "import PyQt5")[0] != 0:
+            say("NOTE: Krita's Python plugins need python-pyqt6 (sudo pacman -S --needed python-pyqt6);")
+            say("      until then Krita draws with touch but does not follow the DRAW/NAVIGATE switch")
+    else:
+        say("not installed: skipped")
+    ORIGINALS.write_text(json.dumps(orig, indent=1) + "\n")
+
+    print("== Shortcut and tray")
+    DESKTOP.parent.mkdir(parents=True, exist_ok=True)
+    DESKTOP.write_text("[Desktop Entry]\nType=Application\nName=Pen mode: switch DRAW / NAVIGATE\n"
+                       f"Exec={BIN} toggle\nIcon=draw-freehand\nNoDisplay=true\nX-KDE-GlobalAccel-CommandShortcut=true\n")
+    sh("kbuildsycoca6", timeout=20)
+    owner = gdbus("org.kde.kglobalaccel", "/kglobalaccel", "org.kde.KGlobalAccel.actionList", f"([{SHORTCUT},0,0,0],)")[1]
+    ident = "[" + ", ".join(repr(a) for a in ACTION) + "]"
+    if "@as []" in owner or ACTION[0] in owner:
+        gdbus("org.kde.kglobalaccel", "/kglobalaccel", "org.kde.KGlobalAccel.doRegister", ident)
+        rc, _ = gdbus("org.kde.kglobalaccel", "/kglobalaccel", "org.kde.KGlobalAccel.setShortcut", ident, f"[{SHORTCUT}]", "6")
+        say(f"{SHORTCUT_TEXT} switches the mode" if rc == 0 else "could not register the shortcut (no Plasma session?)")
+    elif owner:
+        say(f"{SHORTCUT_TEXT} is already used by something else; set a key in System Settings > Shortcuts > Pen mode")
+    else:
+        say("no Plasma session found: the shortcut is registered the next time you run 'pen-mode setup' in Plasma")
+    if UNIT.exists():
+        sh("systemctl", "--user", "daemon-reload")
+        rc, _ = sh("systemctl", "--user", "enable", "--now", "pen-mode-tray.service", timeout=15)
+        say("tray icon started (tap it to switch)" if rc == 0 else "could not start the tray icon; try: systemctl --user enable --now pen-mode-tray.service")
+    set_mode("draw", quiet=True)
+    log("setup done")
+    print("== Done: pen mode is DRAW")
+    return 0
+
+
+def uninstall(purge=False):
+    busy = busy_apps()
+    if busy:
+        print(f"Close {', '.join(busy)} first: they write their settings back when they exit.", file=sys.stderr)
+        return 1
+    orig = load_originals()
+    print("== Tray and shortcut")
+    sh("systemctl", "--user", "disable", "--now", "pen-mode-tray.service", timeout=15)
+    UNIT.unlink(missing_ok=True)
+    sh("systemctl", "--user", "daemon-reload")
+    gdbus("org.kde.kglobalaccel", "/kglobalaccel", "org.kde.KGlobalAccel.unregister", ACTION[0], ACTION[1])
+    sh("kwriteconfig6", "--file", "kglobalshortcutsrc", "--group", "services", "--group", ACTION[0], "--key", "_launch", "--delete")
+    DESKTOP.unlink(missing_ok=True)
+    say("removed")
+
+    print("== Putting the apps' own settings back")
+    if "xournalpp" in orig and XOURNAL.exists():
+        xournal_set(orig["xournalpp"])
+        say("Xournal++: " + ", ".join(f"{k}={v}" for k, v in orig["xournalpp"].items()))
+    if "rnote" in orig and rnote_has_schema():
+        o = orig["rnote"]
+        sh("gsettings", "set", RNOTE, "touch-drawing", o.get("touch-drawing", "false"))
+        cfg = rnote_engine()
+        try:
+            brush = cfg["pens_config"]["brush_config"]
+            if "builder_type" in o:
+                brush["builder_type"] = o["builder_type"]
+            if "pressure_curve" in o:
+                brush["solid_options"]["pressure_curve"] = o["pressure_curve"]
+            rnote_engine_write(cfg)
+        except (TypeError, KeyError):
+            pass
+        say("Rnote: " + ", ".join(f"{k}={v}" for k, v in o.items()))
+    if "krita" in orig and have("kwriteconfig6"):
+        for k, v in orig["krita"].items():
+            if k == "python/enable_penmode":
+                kwrite("enable_penmode", v, "python")
+            else:
+                kwrite(k, v)
+        say("Krita: " + ", ".join(f"{k}={'(not set)' if v == ABSENT else v}" for k, v in orig["krita"].items()))
+    if not orig:
+        say("no saved values found: app settings left as they are")
+    (PYKRITA / "penmode.desktop").unlink(missing_ok=True)
+    shutil.rmtree(PYKRITA / "penmode", ignore_errors=True)
+    KRITA_LAUNCHER.unlink(missing_ok=True)
+
+    print("== Files")
+    if BIN.is_symlink():
+        BIN.unlink()
+    if SHARE.is_dir() and (SHARE / "pen-mode").exists():
+        shutil.rmtree(SHARE)
+    if purge:
+        shutil.rmtree(STATE, ignore_errors=True)
+        say("removed, including the saved values and backups")
+    else:
+        ORIGINALS.unlink(missing_ok=True)
+        MODE_FILE.unlink(missing_ok=True)
+        say(f"removed; whole-file backups from before setup stay in {BACKUP}")
+    return 0
+
+
+def main(argv):
+    cmd = argv[1] if len(argv) > 1 else "status"
+    if cmd in ("draw", "navigate"):
+        res = set_mode(cmd)
+    elif cmd == "toggle":
+        cmd = "navigate" if read_mode() == "draw" else "draw"
+        res = set_mode(cmd)
+    elif cmd == "status":
+        status()
+        return 0
+    elif cmd == "setup":
+        return setup()
+    elif cmd == "uninstall":
+        return uninstall("--purge" in argv)
+    else:
+        print(__doc__.strip())
+        return 0 if cmd in ("-h", "--help", "help") else 2
+    print(f"pen mode: {cmd.upper()}")
+    for app, what in res.items():
+        print(f"  {app:<10} {what}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

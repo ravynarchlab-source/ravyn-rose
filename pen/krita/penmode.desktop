@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Service
+ServiceTypes=Krita/PythonPlugin
+X-KDE-Library=penmode
+X-Python-2-Compatible=false
+X-Krita-Manual=
+Name=Pen mode (touch DRAW / NAVIGATE)
+Comment=Follows the pen-mode switch: DRAW selects your drawing tool, NAVIGATE selects the pan tool.

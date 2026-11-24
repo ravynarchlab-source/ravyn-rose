@@ -1,0 +1,4 @@
+__pycache__/
+*.pyc
+# compiled per machine by "rice setup" (or on first "rice on")
+rice/deck/*.qsb

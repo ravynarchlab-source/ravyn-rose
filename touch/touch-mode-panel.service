@@ -1,0 +1,15 @@
+[Unit]
+Description=Bigger Plasma panel and tray icons while in tablet mode (touch-mode-panel)
+PartOf=graphical-session.target
+After=plasma-plasmashell.service plasma-kwin_wayland.service
+
+[Service]
+ExecStart=%h/.local/bin/touch-mode-panel watch
+ExecStopPost=%h/.local/bin/touch-mode-panel off
+Restart=on-failure
+RestartSec=5
+MemoryMax=64M
+CPUQuota=10%
+
+[Install]
+WantedBy=graphical-session.target

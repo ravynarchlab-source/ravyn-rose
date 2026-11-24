@@ -1,0 +1,199 @@
+{
+  "name": "amber",
+  "order": 4,
+  "title": "AMBER",
+  "blurb": "phosphor terminal, scanlines, solid bars",
+  "light": false,
+  "mono": false,
+  "colors": {
+    "bg": "#140a00",
+    "window": "#1c0f02",
+    "button": "#2a1805",
+    "fg": "#ffcf7a",
+    "dim": "#b07a2a",
+    "faint": "#5a3a0c",
+    "accent": "#ffb000",
+    "accent2": "#ffe0a0",
+    "deep": "#7a4a00",
+    "frame_inactive": "#7a5200",
+    "good": "#ffd27a",
+    "warn": "#ff9d00",
+    "bad": "#ff6a00",
+    "hi": "#ffe0a0"
+  },
+  "shader": [
+    "#140a00",
+    "#7a4a00",
+    "#ffb000",
+    "#ffe0a0"
+  ],
+  "ansi": [
+    "#2a1805",
+    "#ff8a00",
+    "#ffc24a",
+    "#ffb000",
+    "#c98a00",
+    "#ffa53a",
+    "#e0a84a",
+    "#ffcf7a",
+    "#5a3a0c",
+    "#ffa733",
+    "#ffd98a",
+    "#ffcc33",
+    "#e6a61a",
+    "#ffbf66",
+    "#ffd9a0",
+    "#fff2d6"
+  ],
+  "shape": {
+    "gap": 6,
+    "border": 2,
+    "radius": 0,
+    "button_border": 0,
+    "brackets": [
+      "> ",
+      " <"
+    ],
+    "bars": 1,
+    "art_mode": 3,
+    "scanlines": 1,
+    "knob": "bar",
+    "lyrics_align": "left",
+    "lyrics_upper": true,
+    "ui_font": "Monocraft",
+    "term_font_size": 9.0,
+    "cursor": "Block",
+    "clock_fill": "#",
+    "chafa": [
+      "--symbols",
+      "ascii",
+      "--fg-only"
+    ],
+    "player_opacity": [
+      94,
+      90
+    ]
+  },
+  "panels": {
+    "matrix": [
+      "-b",
+      "-u",
+      "6",
+      "-C",
+      "yellow"
+    ],
+    "lava": [
+      "-g",
+      "-c",
+      "ffb000",
+      "-k",
+      "5a3a0c",
+      "-s",
+      "2",
+      "-r",
+      "6",
+      "-b",
+      "6"
+    ],
+    "pipes": [
+      "-f",
+      "20",
+      "-p",
+      "1",
+      "-r",
+      "1200",
+      "-t",
+      "0",
+      "-c",
+      "3"
+    ],
+    "cava": {
+      "bar_width": 3,
+      "bar_spacing": 1,
+      "gradient": [
+        "#7a4a00",
+        "#c98a00",
+        "#ffb000",
+        "#ffe0a0"
+      ]
+    }
+  },
+  "tiles": {
+    "landscape": {
+      "term": [
+        0,
+        0,
+        0.27,
+        0.55
+      ],
+      "player": [
+        0,
+        0.55,
+        0.27,
+        0.45
+      ],
+      "deck": [
+        0.27,
+        0,
+        0.48,
+        0.84
+      ],
+      "lyrics": [
+        0.27,
+        0.84,
+        0.48,
+        0.16
+      ],
+      "matrix": [
+        0.75,
+        0,
+        0.25,
+        0.5
+      ],
+      "lava": [
+        0.75,
+        0.5,
+        0.25,
+        0.5
+      ]
+    },
+    "portrait": {
+      "lyrics": [
+        0,
+        0,
+        1,
+        0.07
+      ],
+      "deck": [
+        0,
+        0.07,
+        1,
+        0.5
+      ],
+      "player": [
+        0,
+        0.57,
+        1,
+        0.2
+      ],
+      "term": [
+        0,
+        0.77,
+        0.58,
+        0.23
+      ],
+      "matrix": [
+        0.58,
+        0.77,
+        0.14,
+        0.23
+      ],
+      "lava": [
+        0.72,
+        0.77,
+        0.28,
+        0.23
+      ]
+    }
+  }
+}

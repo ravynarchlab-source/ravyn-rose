@@ -1,0 +1,199 @@
+{
+  "name": "rose",
+  "order": 2,
+  "title": "ROSE",
+  "blurb": "maroon marble, rose frames, soft blocks",
+  "light": false,
+  "mono": false,
+  "colors": {
+    "bg": "#14070b",
+    "window": "#1f0c12",
+    "button": "#2c121a",
+    "fg": "#f3d9e0",
+    "dim": "#b08a95",
+    "faint": "#6b3a48",
+    "accent": "#e0607e",
+    "accent2": "#ffb3c6",
+    "deep": "#8c1c3c",
+    "frame_inactive": "#8c3048",
+    "good": "#7fd1a8",
+    "warn": "#f0a35e",
+    "bad": "#ff5c7a",
+    "hi": "#ffb3c6",
+    "hover": "#f28ba3"
+  },
+  "shader": [
+    "#14070b",
+    "#8c1c3c",
+    "#e0607e",
+    "#ffb3c6"
+  ],
+  "ansi": [
+    "#2c121a",
+    "#e0607e",
+    "#7fd1a8",
+    "#f0a35e",
+    "#c06c84",
+    "#f28ba3",
+    "#d4a5b0",
+    "#f3d9e0",
+    "#6b3a48",
+    "#ff8fa8",
+    "#a5e6c4",
+    "#f7c08a",
+    "#d98ea4",
+    "#ffb3c6",
+    "#ecc6cf",
+    "#ffffff"
+  ],
+  "shape": {
+    "gap": 8,
+    "border": 2,
+    "radius": 0,
+    "button_border": 0,
+    "brackets": [
+      "[ ",
+      " ]"
+    ],
+    "bars": 0,
+    "art_mode": 0,
+    "scanlines": 0,
+    "knob": "bar",
+    "lyrics_align": "center",
+    "lyrics_upper": false,
+    "ui_font": "Monocraft",
+    "term_font_size": 8.5,
+    "cursor": "Beam",
+    "clock_fill": "▓",
+    "chafa": [
+      "--symbols",
+      "block+border+space"
+    ],
+    "player_opacity": [
+      92,
+      88
+    ]
+  },
+  "panels": {
+    "matrix": [
+      "-b",
+      "-u",
+      "6",
+      "-C",
+      "red"
+    ],
+    "lava": [
+      "-g",
+      "-c",
+      "e0607e",
+      "-k",
+      "5a1023",
+      "-s",
+      "3",
+      "-b",
+      "8"
+    ],
+    "pipes": [
+      "-f",
+      "20",
+      "-p",
+      "1",
+      "-r",
+      "1500",
+      "-c",
+      "1",
+      "-c",
+      "5",
+      "-c",
+      "7"
+    ],
+    "cava": {
+      "bar_width": 2,
+      "bar_spacing": 1,
+      "gradient": [
+        "#8c1c3c",
+        "#c0395c",
+        "#e0607e",
+        "#ffb3c6"
+      ]
+    }
+  },
+  "tiles": {
+    "landscape": {
+      "lyrics": [
+        0,
+        0,
+        1,
+        0.1
+      ],
+      "player": [
+        0,
+        0.1,
+        0.27,
+        0.52
+      ],
+      "term": [
+        0,
+        0.62,
+        0.27,
+        0.38
+      ],
+      "deck": [
+        0.27,
+        0.1,
+        0.48,
+        0.9
+      ],
+      "matrix": [
+        0.75,
+        0.1,
+        0.09,
+        0.9
+      ],
+      "lava": [
+        0.84,
+        0.1,
+        0.16,
+        0.9
+      ]
+    },
+    "portrait": {
+      "lyrics": [
+        0,
+        0,
+        1,
+        0.07
+      ],
+      "deck": [
+        0,
+        0.07,
+        1,
+        0.5
+      ],
+      "player": [
+        0,
+        0.57,
+        1,
+        0.2
+      ],
+      "term": [
+        0,
+        0.77,
+        0.58,
+        0.23
+      ],
+      "matrix": [
+        0.58,
+        0.77,
+        0.14,
+        0.23
+      ],
+      "lava": [
+        0.72,
+        0.77,
+        0.28,
+        0.23
+      ]
+    }
+  }
+}

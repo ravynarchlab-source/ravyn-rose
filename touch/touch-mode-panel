@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# touch-mode-panel: bigger Plasma panel and tray icons while the laptop is in tablet mode, normal size otherwise.
+#
+#   touch-mode-panel watch     follow KWin's tablet-mode signal (this is what the systemd user service runs)
+#   touch-mode-panel on|off    apply or undo by hand (for testing)
+#   touch-mode-panel status    show tablet mode, panel height and the last log lines
+#
+# The normal height is saved when tablet mode starts and put back exactly when it ends.
+# Remove: systemctl --user disable --now touch-mode-panel.service
+#         rm ~/.local/bin/touch-mode-panel ~/.config/systemd/user/touch-mode-panel.service
+set -u
+TOUCH_HEIGHT=${TOUCH_HEIGHT:-52}
+ST="${XDG_STATE_HOME:-$HOME/.local/state}/touch-mode-panel"
+SAVED="$ST/normal.saved"
+LOG="$ST/log"
+mkdir -p "$ST"
+log() { printf '%s %s\n' "$(date '+%F %T')" "$*" >> "$LOG"; }
+pjs() { qdbus6 org.kde.plasmashell /PlasmaShell org.kde.PlasmaShell.evaluateScript "$1" 2>/dev/null; }
+tablet_mode() { qdbus6 org.kde.KWin /org/kde/KWin org.freedesktop.DBus.Properties.Get org.kde.KWin.TabletModeManager tabletMode 2>/dev/null; }
+
+read_state() {  # prints: <panel id> <height> <tray scaleIconsToFit>
+  pjs 'var o=[];panels().forEach(function(p){var s="false";p.widgets("org.kde.plasma.systemtray").forEach(function(w){w.currentConfigGroup=["General"];s=""+w.readConfig("scaleIconsToFit","false");});o.push(p.id+" "+p.height+" "+s);});print(o.join("\n"));'
+}
+write_state() {  # id height scale
+  pjs "panels().forEach(function(p){ if (p.id==$1) { p.height=$2;
+        p.widgets('org.kde.plasma.systemtray').forEach(function(w){w.currentConfigGroup=['General'];w.writeConfig('scaleIconsToFit',$3);w.reloadConfig();}); } });" >/dev/null
+}
+
+apply_on() {
+  if [ -s "$SAVED" ]; then log "on: already in touch size"; return; fi
+  local st; st=$(read_state)
+  [ -n "$st" ] || { log "on: plasmashell did not answer; nothing changed"; return 1; }
+  printf '%s\n' "$st" > "$SAVED"
+  while read -r id h scale; do
+    [ -n "$id" ] && { write_state "$id" "$TOUCH_HEIGHT" true; log "on: panel $id height $h -> $TOUCH_HEIGHT, tray icons scale to fit"; }
+  done < "$SAVED"
+}
+apply_off() {
+  [ -s "$SAVED" ] || { log "off: nothing saved; panel left as it is"; return; }
+  while read -r id h scale; do
+    [ -n "$id" ] && { write_state "$id" "$h" "${scale:-false}"; log "off: panel $id height back to $h, tray scale $scale"; }
+  done < "$SAVED"
+  rm -f "$SAVED"
+}
+sync_now() { if [ "$(tablet_mode)" = "true" ]; then apply_on; else apply_off; fi; }
+
+case "${1:-status}" in
+  on) apply_on ;;
+  off) apply_off ;;
+  watch)
+    log "watch: started (tablet mode now: $(tablet_mode))"
+    sync_now
+    dbus-monitor --session "type='signal',interface='org.kde.KWin.TabletModeManager',member='tabletModeChanged'" 2>/dev/null |
+    while read -r line; do
+      case "$line" in
+        *"boolean true"*)  log "signal: tablet mode ON";  apply_on ;;
+        *"boolean false"*) log "signal: tablet mode OFF"; apply_off ;;
+      esac
+    done ;;
+  status)
+    echo "tablet mode: $(tablet_mode)"
+    echo "panels (id height trayScale): $(read_state | tr '\n' ';')"
+    echo "saved normal size: $( [ -s "$SAVED" ] && tr '\n' ';' < "$SAVED" || echo '(none, panel is at normal size)')"
+    echo "service: $(systemctl --user is-active touch-mode-panel.service 2>/dev/null)"
+    [ -f "$LOG" ] && tail -n 8 "$LOG" ;;
+  *) echo "usage: touch-mode-panel watch|on|off|status" >&2; exit 2 ;;
+esac

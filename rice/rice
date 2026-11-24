@@ -1,0 +1,547 @@
+#!/usr/bin/env bash
+# rice — toggle the "rice" desktop on KDE Plasma 6 (Wayland) without changing anything permanently.
+#   rice on         save current look -> apply the flavour (colours, wallpaper, frames) -> open and tile the panels
+#   rice off        close every rice process -> restore the saved look exactly
+#   rice toggle     on if off, off if on (used by the panel button and the app launcher)
+#   rice status     show what is running and its CPU / RAM
+#   rice player pear|fooyin|auto   which player takes the music tile (default auto: Pear if running, else fooyin)
+#   rice layout deck|classic       centre tile: the ASCII DECK (default), or the cava + pipes terminals
+#   rice flavour NAME|random|list  switch flavour (mono, rose, neon, amber, paper); no name opens the picker
+#   rice setup      one-time: systemd slice, launchers, Meta+Alt+N (on) / Meta+Alt+O (off) (no autostart)
+#   rice button     add the "Rice" toggle button to the first Plasma panel
+#   rice uninstall  rice off + remove every rice file, shortcut and setting
+# Every panel runs inside the systemd user slice "rice.slice", so `rice off` can stop all of them at once
+# and nothing outside the slice is ever killed. Music players are started OUTSIDE the slice: rice off
+# never stops the music.
+set -uo pipefail
+
+R="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"      # where this script and the panel files live
+INSTALLED="$HOME/.local/share/rice"                      # where install.sh puts them
+ST="${XDG_STATE_HOME:-$HOME/.local/state}/rice"
+C="$HOME/.config"
+SCHEMES="$HOME/.local/share/color-schemes"
+APPS="$HOME/.local/share/applications"
+SLICE_FILE="$C/systemd/user/rice.slice"
+RCFG="$C/rice"                       # user settings (player mode, layout, deck options)
+RCACHE="${XDG_CACHE_HOME:-$HOME/.cache}/rice"
+RUNDIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/rice"   # the deck's socket, FIFO and textures (tmpfs)
+FL="$ST/flavour"                     # files generated for the flavour in use (flavour.py build)
+mkdir -p "$ST"
+LOG="$ST/log"
+log() { printf '%s [rice] %s\n' "$(date '+%F %T')" "$*" | tee -a "$LOG"; }
+# every invocation is recorded before anything else (the launchers pass --from=shortcut)
+FROM=terminal; for a in "$@"; do case "$a" in --from=*) FROM=${a#--from=} ;; esac; done
+# KDE starts shortcut launches in their own systemd scope (app-rice\x2don@….scope): trust that over arguments
+grep -qE 'app-rice\\x2d(on|off)' /proc/self/cgroup 2>/dev/null && FROM=shortcut
+grep -qE 'app-rice\\x2dtoggle' /proc/self/cgroup 2>/dev/null && FROM=button
+printf '%s [rice] TRIGGER %s from %s (pid %s)\n' "$(date '+%F %T')" "${1:-status}" "$FROM" "$$" >> "$LOG"
+exec 9>"$ST/lock"; flock -w 30 9 || { log "another rice command is still running; gave up"; exit 1; }
+have() { command -v "$1" >/dev/null 2>&1; }
+notify() { have notify-send && notify-send -a rice -i preferences-desktop-color "Rice" "$1" -t 2500 || true; }
+q() { qdbus6 "$@" 2>/dev/null; }
+pjs() { q org.kde.plasmashell /PlasmaShell org.kde.PlasmaShell.evaluateScript "$1"; }
+kwin_reconfigure() { q org.kde.KWin /KWin org.kde.KWin.reconfigure >/dev/null; }
+kwin_load() {  # file name: (re)load a KWin script and run it; it stays loaded until `kwin_unload name`
+  q org.kde.KWin /Scripting org.kde.kwin.Scripting.unloadScript "$2" >/dev/null
+  local id; id=$(q org.kde.KWin /Scripting org.kde.kwin.Scripting.loadScript "$1" "$2")
+  q org.kde.KWin "/Scripting/Script$id" org.kde.kwin.Script.run >/dev/null
+  # KWin numbers a new script by how many are loaded, so after another script was unloaded the number
+  # can belong to a script that is still there and the line above reaches the wrong one. start() runs
+  # every loaded script that has not run yet (and nothing twice), which covers that case.
+  q org.kde.KWin /Scripting org.kde.kwin.Scripting.start >/dev/null
+}
+kwin_unload() { q org.kde.KWin /Scripting org.kde.kwin.Scripting.unloadScript "$1" >/dev/null; }
+kwin_once() { kwin_load "$1" "$2"; sleep 0.5; kwin_unload "$2"; }   # run a script one time
+
+# ---------- look: save / apply / restore ----------
+save_look() {
+  cp -p "$C/kdeglobals" "$ST/kdeglobals.saved"
+  rm -rf "$ST/gtk.saved"; mkdir -p "$ST/gtk.saved"          # GTK colours are regenerated from the scheme: keep exact copies
+  for g in gtk-3.0 gtk-4.0; do
+    mkdir -p "$ST/gtk.saved/$g"
+    [ -e "$C/$g/colors.css" ] && cp -a "$C/$g/colors.css" "$ST/gtk.saved/$g/"
+    [ -d "$C/$g/assets" ] && cp -a "$C/$g/assets" "$ST/gtk.saved/$g/"
+  done
+  kreadconfig6 --file kdeglobals --group General --key ColorScheme > "$ST/scheme.saved"
+  pjs 'var o=[];desktops().forEach(function(d){d.currentConfigGroup=["Wallpaper","org.kde.image","General"];o.push(d.id+"\t"+d.wallpaperPlugin+"\t"+d.readConfig("Image",""));});print(o.join("\n"));' > "$ST/wallpapers.tsv"
+  for f in kwinrulesrc breezerc; do
+    if [ -e "$C/$f" ]; then cp -p "$C/$f" "$ST/$f.saved"; else : > "$ST/$f.absent"; fi
+  done
+}
+
+set_wallpaper() {  # id plugin image
+  pjs "desktops().forEach(function(d){ if (d.id==$1) { d.wallpaperPlugin='$2';
+        if ('$2'=='org.kde.image') { d.currentConfigGroup=['Wallpaper','org.kde.image','General']; d.writeConfig('Image','$3'); }
+        d.reloadConfig(); } });" >/dev/null
+}
+
+flavour_name() { python3 "$R/flavour.py" current; }
+flavour_build() {  # (re)generate the files for the flavour in use and load its settings
+  python3 "$R/flavour.py" build "$(flavour_name)" "$FL" || { log "flavour: could not build $(flavour_name)"; exit 1; }
+  # shellcheck disable=SC1091
+  . "$FL/env.sh"
+  if have fastfetch; then                                 # the showcase header, rendered ahead so the tile opens at once
+    local pos logo
+    for pos in left top; do
+      logo="$R/showcase/logos/$FL_NAME.txt"; [ "$pos" = top ] && logo="$R/showcase/logos/$FL_NAME-small.txt"
+      fastfetch -c "$FL/fastfetch.jsonc" --pipe false --logo "$logo" --logo-position "$pos" > "$FL/header-$pos.ans" 2>/dev/null
+    done
+  fi
+}
+remove_schemes() {  # only the scheme files this script installs
+  local n
+  for n in $(python3 "$R/flavour.py" names); do rm -f "$SCHEMES/Rice${n^}.colors" "$SCHEMES/Rice${n^}Border.colors"; done
+  rm -f "$SCHEMES/RiceMaroon.colors" "$SCHEMES/RiceBorder.colors"     # names used before flavours existed
+  rmdir "$SCHEMES" 2>/dev/null || true
+}
+
+apply_look() {
+  flavour_build
+  # KWin caches a frame colour scheme by its path, so every flavour has its own two files
+  install -Dm644 "$FL/$FL_SCHEME.colors" "$SCHEMES/$FL_SCHEME.colors"
+  install -Dm644 "$FL/$FL_BORDER_SCHEME.colors" "$SCHEMES/$FL_BORDER_SCHEME.colors"
+  # a custom accent colour would override the scheme's selection colour: drop it while the rice is on.
+  # (rice off copies your original kdeglobals back byte-for-byte, so the accent returns.)
+  kwriteconfig6 --file kdeglobals --group General --key AccentColor --delete
+  plasma-apply-colorscheme "$FL_SCHEME" >/dev/null
+  while IFS=$'\t' read -r id _ _; do
+    [ -n "$id" ] && set_wallpaper "$id" org.kde.image "file://$FL_WALL"
+  done < "$ST/wallpapers.tsv"
+  # coloured frames + no title bar for rice windows only (matched by window class)
+  cat > "$C/kwinrulesrc" <<EOF
+[General]
+Order=rice-panels,rice-player,rice-pear,rice-lyrics
+
+[rice-panels]
+Description=rice panels (created by rice on)
+decocolor=$FL_BORDER_SCHEME
+decocolorrule=2
+wmclass=rice-
+wmclasscomplete=false
+wmclassmatch=2
+
+[rice-player]
+Description=rice player (created by rice on)
+decocolor=$FL_BORDER_SCHEME
+decocolorrule=2
+opacityactive=$FL_OPACITY_ACTIVE
+opacityactiverule=2
+opacityinactive=$FL_OPACITY_INACTIVE
+opacityinactiverule=2
+wmclass=fooyin
+wmclasscomplete=false
+wmclassmatch=2
+
+[rice-pear]
+Description=rice Pear Desktop frame (created by rice on; opaque so nothing shows through)
+decocolor=$FL_BORDER_SCHEME
+decocolorrule=2
+wmclass=youtube-music
+wmclasscomplete=false
+wmclassmatch=2
+
+[rice-lyrics]
+Description=rice lyrics window (created by rice on)
+decocolor=$FL_BORDER_SCHEME
+decocolorrule=2
+title=rice-lyrics
+titlematch=1
+EOF
+  cat > "$C/breezerc" <<EOF
+[Windeco Exception 0]
+BorderSize=$FL_BORDERSIZE
+Enabled=true
+ExceptionPattern=rice-|fooyin|youtube-music
+ExceptionType=0
+HideTitleBar=true
+Mask=16
+
+[Windeco Exception 1]
+BorderSize=$FL_BORDERSIZE
+Enabled=true
+ExceptionPattern=^rice-lyrics\$
+ExceptionType=1
+HideTitleBar=true
+Mask=16
+EOF
+  kwin_reconfigure
+}
+
+restore_look() {
+  [ -f "$ST/kdeglobals.saved" ] || { log "no saved look found; nothing to restore"; return; }
+  local scheme accent; scheme=$(cat "$ST/scheme.saved")
+  accent=$(kreadconfig6 --file "$ST/kdeglobals.saved" --group General --key AccentColor)
+  plasma-apply-colorscheme "${scheme:-BreezeDark}" >/dev/null      # real switch back (live apps + GTK regenerate)
+  # shellcheck disable=SC2046,SC2086  # the three colour numbers are meant to split into three arguments
+  [ -n "$accent" ] && plasma-apply-colorscheme --accent-color "$(printf '#%02X%02X%02X' ${accent//,/ })" >/dev/null
+  cp -p "$ST/kdeglobals.saved" "$C/kdeglobals"                     # then byte-exact originals
+  for g in gtk-3.0 gtk-4.0; do                                     # only the generated colour files
+    [ -e "$ST/gtk.saved/$g/colors.css" ] && cp -a "$ST/gtk.saved/$g/colors.css" "$C/$g/colors.css"
+    [ -d "$ST/gtk.saved/$g/assets" ] && rsync -a --delete "$ST/gtk.saved/$g/assets/" "$C/$g/assets/"
+  done
+  dbus-send --session --type=signal /KGlobalSettings org.kde.KGlobalSettings.notifyChange int32:0 int32:0
+  while IFS=$'\t' read -r id plugin img; do
+    [ -n "$id" ] && set_wallpaper "$id" "$plugin" "$img"
+  done < "$ST/wallpapers.tsv"
+  for f in kwinrulesrc breezerc; do
+    if [ -f "$ST/$f.saved" ]; then cp -p "$ST/$f.saved" "$C/$f"; elif [ -f "$ST/$f.absent" ]; then rm -f "$C/$f"; fi
+  done
+  kwin_reconfigure
+  remove_schemes
+  rm -rf "$ST/gtk.saved"; rm -f "$ST"/kdeglobals.saved "$ST"/scheme.saved "$ST"/wallpapers.tsv "$ST"/*.absent "$ST"/*rc.saved
+}
+
+# ---------- panels ----------
+launch() {  # name cmd...
+  local name=$1; shift
+  systemctl --user is-active --quiet "rice-$name" && return 0     # already running: never start a second copy
+  systemd-run --user --quiet --collect --slice=rice --unit="rice-$name" \
+    --working-directory="$HOME" -- "$@" || log "failed to start $name"
+}
+term() {  # name program args...: a terminal panel; skipped with a log line when the program is not installed
+  local name=$1 bin; shift
+  have alacritty || { log "no $name panel: alacritty is not installed"; return 0; }
+  bin=$(command -v "$1") || { log "no $name panel: $1 is not installed"; return 0; }
+  shift
+  launch "$name" "$(command -v alacritty)" --class "rice-$name" --title "rice $name" --config-file "$FL/alacritty.toml" -e "$bin" "$@"
+}
+shell_panel() {  # the terminal tile: the ASCII showcase (Enter drops to a shell).
+  # RICE_TERM_CMD="some command" replaces what runs in it; RICE_TERM_CMD=shell gives a plain shell.
+  if [ "${RICE_TERM_CMD:-}" = shell ]; then term term "$(command -v fish || echo "${SHELL:-bash}")"
+  elif [ -n "${RICE_TERM_CMD:-}" ]; then term term sh -c "$RICE_TERM_CMD"
+  else term term env RICE_T0="$(date +%s%N)" python3 -S "$R/showcase/showcase.py" "$FL/theme.json"; fi
+}
+
+player_mode() { local m; m=$(cat "$RCFG/player" 2>/dev/null); case "$m" in pear|fooyin) echo "$m" ;; *) echo auto ;; esac; }
+layout_mode() { local m; m=$(cat "$RCFG/layout" 2>/dev/null); case "$m" in classic) echo classic ;; *) echo deck ;; esac; }
+# Pear Desktop (package pear-desktop-bin) installs to /opt/YouTube Music and is started as /usr/bin/youtube-music
+pear_running() { pgrep -f '^/opt/YouTube Music/youtube-music' >/dev/null; }
+fooyin_running() { pgrep -x fooyin >/dev/null; }
+start_music() {  # id program: started outside rice.slice, so rice off never stops the music
+  local bin; bin=$(command -v "$2") || { log "$1 is not installed"; return 1; }
+  log "starting $1"
+  systemd-run --user --quiet --collect --unit="music-$1-$(date +%s)" --working-directory="$HOME" -- "$bin" \
+    || log "failed to start $1"
+}
+ensure_player() {
+  case "$(player_mode)" in
+    pear)   pear_running   || start_music pear youtube-music ;;
+    fooyin) fooyin_running || start_music fooyin fooyin ;;
+    auto)   pear_running || fooyin_running || start_music fooyin fooyin || start_music pear youtube-music \
+              || log "no music player installed: the music tile stays empty" ;;
+  esac
+}
+untile_players() {  # give player windows their normal opacity back (they keep running)
+  printf '%s\n' 'workspace.windowList().forEach(function(w){ var c=String(w.resourceClass).toLowerCase();' \
+    ' if (c.indexOf("fooyin")>=0 || c.indexOf("youtube-music")>=0) w.opacity = 1.0; });' > "$ST/untile.js"
+  kwin_once "$ST/untile.js" rice-untile
+}
+
+load_tiler() {
+  python3 "$R/flavour.py" tiler "$(flavour_name)" "$(layout_mode)" "$(player_mode)" > "$ST/tile.js"
+  kwin_load "$ST/tile.js" rice-tile
+}
+unload_tiler() { kwin_unload rice-tile; }
+
+is_on() { [ -f "$ST/active" ]; }
+
+rice_on() {
+  if is_on; then
+    log "already on: making sure every panel is up"; start_panels    # panels that run are left alone
+    exit 0
+  fi
+  log "on: saving current look"; save_look
+  : > "$ST/active"
+  log "applying the $(flavour_name) flavour"; apply_look
+  load_tiler
+  log "starting panels ($(layout_mode) layout)"
+  start_panels
+  notify "on  ·  $(flavour_name)  ·  click Rice or Meta+Alt+O to turn off"
+  log "on: done"
+}
+
+start_panels() {  # panels that are already running are left alone
+  mkdir -p "$RCACHE"
+  [ -n "${FL_NAME:-}" ] || flavour_build
+  shell_panel                                             # first, so the showcase is up before the heavier panels load
+  launch lyricsd /usr/bin/python3 "$R/lyrics.py"
+  systemctl --user is-active --quiet rice-lyrics || \
+  systemd-run --user --quiet --collect --slice=rice --unit=rice-lyrics -E QML_XHR_ALLOW_FILE_READ=1 \
+    --working-directory="$HOME" -- /usr/bin/qml6 "$R/lyrics.qml" -- "$FL/theme.json" "$RCACHE/now.json" || log "failed to start lyrics window"
+  ensure_player
+  if [ "$(layout_mode)" = classic ]; then                 # two terminals in the centre: spectrum and pipes
+    term cava  cava -p "$FL/cava.conf"
+    term pipes pipes.sh "${FL_PIPES[@]}"
+  else                                                    # ASCII DECK: art, controls, spectrum (runs its own cava)
+    { [ -f "$R/deck/ascii.frag.qsb" ] && [ -f "$R/deck/spectrum.frag.qsb" ]; } || compile_shaders
+    launch deck /usr/bin/python3 "$R/deck/deck.py" "$FL/theme.json"
+  fi
+  term matrix cmatrix "${FL_MATRIX[@]}"
+  term lava   lavat "${FL_LAVA[@]}"
+  # KWin's own initial placement can win over the tiler for brand-new windows: tile again once they are up
+  sleep 2; load_tiler; sleep 2; load_tiler
+}
+
+panels_running() { systemctl --user list-units --plain --no-legend 'rice-*' 2>/dev/null | grep -q .; }
+stop_panels() {  # every rice panel process; the look (colours, wallpaper, window rules) is not touched
+  systemctl --user stop rice.slice 2>/dev/null
+  for _ in $(seq 1 30); do
+    panels_running || break
+    sleep 0.2
+  done
+  systemctl --user reset-failed 'rice-*' 2>/dev/null || true
+  rm -rf "${RUNDIR:?}"
+}
+
+rice_off() {
+  log "off: stopping panels"
+  stop_panels
+  unload_tiler
+  untile_players
+  if is_on || [ -f "$ST/kdeglobals.saved" ]; then log "restoring saved look"; restore_look; fi
+  rm -f "$ST/active"
+  local left; left=$(systemctl --user list-units --plain --no-legend 'rice-*' 2>/dev/null)
+  if [ -z "$left" ]; then log "off: all rice processes closed"; else log "off: WARNING still running: $left"; fi
+  notify "off  ·  original look restored (music keeps playing)"
+}
+
+rice_player() {
+  case "${1:-}" in
+    pear|fooyin|auto) mkdir -p "$RCFG"; echo "$1" > "$RCFG/player"; log "music tile: $1" ;;
+    ""|show) echo "music tile: $(player_mode)"; return ;;
+    *) echo "usage: rice player pear|fooyin|auto"; exit 2 ;;
+  esac
+  if is_on; then ensure_player; load_tiler; sleep 2; load_tiler; fi
+}
+
+rice_layout() {
+  case "${1:-}" in
+    deck|classic) mkdir -p "$RCFG"; echo "$1" > "$RCFG/layout"; log "layout: $1" ;;
+    ""|show) echo "layout: $(layout_mode)"; return ;;
+    *) echo "usage: rice layout deck|classic"; exit 2 ;;
+  esac
+  if is_on; then                                          # swap the centre panels, keep everything else running
+    for u in rice-deck rice-cava rice-pipes; do systemctl --user stop "$u" 2>/dev/null; done   # one by one: a unit that is not loaded would fail the whole call
+    systemctl --user reset-failed 'rice-*' 2>/dev/null || true
+    start_panels
+  fi
+}
+
+rice_flavour() {
+  local want=${1:-} out="$ST/pick"
+  case "$want" in
+    list) python3 "$R/flavour.py" list; return ;;
+    show) echo "flavour: $(flavour_name)"; return ;;
+    random) want=$(python3 "$R/flavour.py" random) ;;
+    ""|pick)                                              # the picker: here if this is a terminal, else its own window
+      rm -f "$out"; flock -u 9
+      if [ -t 0 ] && [ -t 1 ]; then python3 "$R/flavour.py" pick "$out"
+      elif have alacritty; then
+        alacritty --class rice-picker --title "rice flavour" -o window.dimensions.columns=78 -o window.dimensions.lines=9 \
+          -e python3 "$R/flavour.py" pick "$out"
+      else echo "no terminal for the picker: use rice flavour NAME (rice flavour list)"; exit 1; fi
+      flock -w 30 9 || exit 1
+      want=$(cat "$out" 2>/dev/null); rm -f "$out"
+      [ -n "$want" ] || { echo "flavour unchanged: $(flavour_name)"; return; } ;;
+  esac
+  case " $(python3 "$R/flavour.py" names) " in
+    *" $want "*) ;;
+    *) echo "unknown flavour: $want"; python3 "$R/flavour.py" list; exit 2 ;;
+  esac
+  mkdir -p "$RCFG"; echo "$want" > "$RCFG/flavour"; log "flavour: $want"
+  if is_on; then                                          # new look and fresh panels; the saved original look is kept
+    stop_panels
+    apply_look
+    load_tiler
+    start_panels
+    notify "flavour: $want"
+  fi
+}
+
+rice_status() {
+  if is_on; then echo "rice: ON"; else echo "rice: off"; fi
+  echo "  flavour: $(flavour_name)   layout: $(layout_mode)   music tile: $(player_mode)   pear: $(pear_running && echo running || echo -)   fooyin: $(fooyin_running && echo running || echo -)"
+  systemctl --user list-units --plain --no-legend 'rice-*' 2>/dev/null | awk '{print "  " $1, $3, $4}'
+  local mem cpu
+  mem=$(systemctl --user show rice.slice -p MemoryCurrent --value 2>/dev/null)
+  cpu=$(systemctl --user show rice.slice -p CPUUsageNSec --value 2>/dev/null)
+  [[ "$mem" =~ ^[0-9]+$ ]] && echo "  memory: $((mem/1024/1024)) MiB"
+  [[ "$cpu" =~ ^[0-9]+$ ]] && echo "  cpu time so far: $((cpu/1000000)) ms"
+}
+
+only_installed() {  # setup and uninstall write launchers that point at this copy, or delete it: installed copy only
+  [ "$R" = "$INSTALLED" ] && return 0
+  echo "rice $1 only works from the installed copy ($INSTALLED). Run ./install.sh first." >&2; exit 1
+}
+
+rice_setup() {
+  only_installed setup
+  mkdir -p "$(dirname "$SLICE_FILE")" "$APPS" "$HOME/.local/bin"
+  cat > "$SLICE_FILE" <<'EOF'
+# Safety caps for every rice panel (created by `rice setup`).
+[Slice]
+CPUQuota=100%
+MemoryMax=1536M
+EOF
+  systemctl --user daemon-reload
+  ln -sf "$R/rice" "$HOME/.local/bin/rice"
+  for a in on off; do
+    cat > "$APPS/rice-$a.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Name=Rice $a
+Exec=$HOME/.local/bin/rice $a --from=shortcut
+Icon=preferences-desktop-color
+NoDisplay=true
+X-KDE-GlobalAccel-CommandShortcut=true
+EOF
+  done
+  cat > "$APPS/rice-toggle.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Name=Rice
+Comment=Toggle the rose rice on/off (runs: rice toggle)
+Exec=$HOME/.local/bin/rice toggle --from=button
+Icon=preferences-desktop-color
+Terminal=false
+Categories=Utility;
+EOF
+  cat > "$APPS/rice-flavour.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Name=Rice flavour
+Comment=Pick the rice flavour (mono, rose, neon, amber, paper)
+Exec=$HOME/.local/bin/rice flavour pick --from=launcher
+Icon=preferences-desktop-color
+Terminal=false
+Categories=Utility;
+EOF
+  # Meta+Alt+N = 0x1800004E, Meta+Alt+O = 0x1800004F (Qt key codes); flags 6 = SetPresent|NoAutoloading.
+  # (Meta+Shift+R and Meta+Alt+R are Spectacle's recording defaults: never use them.)
+  for pair in "on:402653262" "off:402653263"; do
+    a=${pair%%:*}; k=${pair##*:}
+    gdbus call --session --dest org.kde.kglobalaccel --object-path /kglobalaccel \
+      --method org.kde.KGlobalAccel.doRegister "['rice-$a.desktop', '_launch', 'Rice $a', 'Rice $a']" >/dev/null
+    gdbus call --session --dest org.kde.kglobalaccel --object-path /kglobalaccel \
+      --method org.kde.KGlobalAccel.setShortcut "['rice-$a.desktop', '_launch', 'Rice $a', 'Rice $a']" "[$k]" 6 >/dev/null
+  done
+  kbuildsycoca6 >/dev/null 2>&1 || true   # make KDE pick up the launchers' current Exec= line
+  deck_setup
+  log "setup done: Meta+Alt+N = rice on, Meta+Alt+O = rice off (no autostart)"
+}
+
+# ---------- the "Rice" button on the Plasma panel ----------
+BUTTON_FILE="${RICE_BUTTON_FILE:-$APPS/rice-toggle.desktop}"   # (the override exists only to test this on a throwaway file)
+rice_button() {
+  [ -f "$BUTTON_FILE" ] || { echo "no launcher at $BUTTON_FILE yet: run rice setup first" >&2; exit 1; }
+  pjs 'var f="'"$BUTTON_FILE"'", n=f.split("/").pop(), there=false;
+       panels().forEach(function(p){ p.widgets("org.kde.plasma.icon").forEach(function(w){
+         w.currentConfigGroup=["General"]; if (String(w.readConfig("url","")).indexOf(n)>=0) there=true; }); });
+       if (there) print("already on the panel");
+       else if (!panels().length) print("no panel found");
+       else { var w=panels()[0].addWidget("org.kde.plasma.icon"); w.currentConfigGroup=["General"];
+              w.writeConfig("url","file://"+f); w.reloadConfig(); print("added to the panel"); }'
+}
+button_remove() {
+  pjs 'var n="'"${BUTTON_FILE##*/}"'"; panels().forEach(function(p){ p.widgets("org.kde.plasma.icon").forEach(function(w){
+         w.currentConfigGroup=["General"]; if (String(w.readConfig("url","")).indexOf(n)>=0) w.remove(); }); });' >/dev/null
+  local base=${BUTTON_FILE##*/}; base=${base%.desktop}
+  rm -f "$HOME"/.local/share/plasma_icons/"$base"*.desktop
+  rmdir "$HOME/.local/share/plasma_icons" 2>/dev/null || true
+}
+
+# ---------- ASCII DECK: global shortcuts ----------
+# Meta+Alt+PgUp / PgDn = volume, Meta+Alt+, / . = previous / next (Qt key codes below).
+# Meta+Alt+arrows belong to KWin ("Switch to Window ..."), so they are not used.
+# The laptop's own volume and media keys are not touched.
+DECK_KEYS="rice-vol-up:419430422:vol+:Rice volume up
+rice-vol-down:419430423:vol-:Rice volume down
+rice-prev:402653228:prev:Rice previous track
+rice-next:402653230:next:Rice next track"
+
+compile_shaders() {  # the two deck shaders, compiled for the Qt version on this machine
+  local qsb=/usr/lib/qt6/bin/qsb f
+  [ -x "$qsb" ] || { log "deck: $qsb not found (package qt6-shadertools): the deck cannot draw without its compiled shaders"; return 1; }
+  for f in ascii spectrum; do
+    "$qsb" --glsl "300 es,150,330" -o "$R/deck/$f.frag.qsb" "$R/deck/$f.frag" 2>/dev/null || log "deck: could not compile $f.frag"
+  done
+}
+
+deck_setup() {
+  local name key cmd title owner
+  compile_shaders
+  printf '%s\n' '[Desktop Entry]' 'Type=Application' 'Name=Rice ASCII Deck' "Exec=$HOME/.local/bin/rice on --from=launcher" \
+    'Icon=preferences-desktop-color' 'NoDisplay=true' > "$APPS/rice-deck.desktop"       # gives the deck window its name and icon
+  while IFS=: read -r name key cmd title <&3; do          # 1. the launcher files
+    [ -n "$name" ] || continue
+    printf '%s\n' '[Desktop Entry]' 'Type=Application' "Name=$title" "Exec=/usr/bin/python3 $R/deck/ctl.py $cmd" \
+      'Icon=preferences-desktop-color' 'NoDisplay=true' 'X-KDE-GlobalAccel-CommandShortcut=true' > "$APPS/$name.desktop"
+  done 3<<< "$DECK_KEYS"
+  kbuildsycoca6 >/dev/null 2>&1 || true                   # 2. let KDE see them before registering keys
+  while IFS=: read -r name key cmd title <&3; do          # 3. the keys, each only if free or already ours
+    [ -n "$name" ] || continue
+    owner=$(gdbus call --session --dest org.kde.kglobalaccel --object-path /kglobalaccel \
+        --method org.kde.KGlobalAccel.actionList "([$key,0,0,0],)" 2>/dev/null </dev/null)
+    case "$owner" in
+      *"@as []"*|*"$name.desktop"*)
+        gdbus call --session --dest org.kde.kglobalaccel --object-path /kglobalaccel \
+          --method org.kde.KGlobalAccel.doRegister "['$name.desktop', '_launch', '$title', '$title']" >/dev/null </dev/null
+        gdbus call --session --dest org.kde.kglobalaccel --object-path /kglobalaccel \
+          --method org.kde.KGlobalAccel.setShortcut "['$name.desktop', '_launch', '$title', '$title']" "[$key]" 6 >/dev/null </dev/null ;;
+      *) log "deck: the key for '$title' is taken ($owner): not set" ;;
+    esac
+  done 3<<< "$DECK_KEYS"
+  kbuildsycoca6 >/dev/null 2>&1 || true
+  log "deck: shortcuts set (Meta+Alt+PgUp/PgDn volume, Meta+Alt+, / . previous/next)"
+}
+
+deck_uninstall() {
+  local name key cmd title
+  while IFS=: read -r name key cmd title <&3; do
+    [ -n "$name" ] || continue
+    gdbus call --session --dest org.kde.kglobalaccel --object-path /kglobalaccel \
+      --method org.kde.KGlobalAccel.unregister "$name.desktop" "_launch" >/dev/null 2>&1 </dev/null
+    kwriteconfig6 --file kglobalshortcutsrc --group "services" --group "$name.desktop" --key _launch --delete
+    [ -f "$C/kglobalshortcutsrc" ] && sed -i "/^\\[services\\]\\[$name\\.desktop\\]\$/,/^\$/d" "$C/kglobalshortcutsrc"
+    rm -f "${APPS:?}/${name:?}.desktop"
+  done 3<<< "$DECK_KEYS"
+  rm -f "${APPS:?}/rice-deck.desktop"
+  rm -rf "${RUNDIR:?}"
+}
+
+rice_uninstall() {
+  only_installed uninstall
+  rice_off
+  deck_uninstall
+  for a in on off; do
+    gdbus call --session --dest org.kde.kglobalaccel --object-path /kglobalaccel \
+      --method org.kde.KGlobalAccel.unregister "rice-$a.desktop" "_launch" >/dev/null 2>&1
+    kwriteconfig6 --file kglobalshortcutsrc --group "services" --group "rice-$a.desktop" --key _launch --delete
+    rm -f "$APPS/rice-$a.desktop"
+  done
+  [ -f "$C/kglobalshortcutsrc" ] && sed -i '/^\[services\]\[rice-\(on\|off\)\.desktop\]$/,/^$/d' "$C/kglobalshortcutsrc"
+  button_remove                                           # panel button, then the launchers
+  rm -f "$APPS/rice-toggle.desktop" "$APPS/rice-flavour.desktop" "$HOME/Desktop/rice-toggle.desktop"
+  kbuildsycoca6 >/dev/null 2>&1 || true
+  rm -f "$SLICE_FILE"; systemctl --user daemon-reload
+  rm -f "$HOME/.local/bin/rice"
+  rm -rf "$HOME/.local/share/fonts/rice" && fc-cache -f >/dev/null 2>&1
+  rm -rf "$ST" "$INSTALLED" "$RCACHE" "$RCFG"
+  echo "[rice] uninstalled. Kept: the packages, and anything in ~/Music."
+}
+
+case "${1:-status}" in
+  on) rice_on ;;
+  off) rice_off ;;
+  player) rice_player "${2:-}" ;;
+  layout) rice_layout "${2:-}" ;;
+  flavour|flavor) rice_flavour "${2:-}" ;;
+  toggle) if is_on; then log "toggle: rice is on -> off"; rice_off; else log "toggle: rice is off -> on"; rice_on; fi ;;
+  status) rice_status ;;
+  setup) rice_setup ;;
+  button) rice_button ;;
+  button-remove) button_remove ;;            # internal: remove only the panel button
+  deck-setup) only_installed deck-setup; deck_setup ;;   # internal: compile shaders + global shortcuts only
+  uninstall) rice_uninstall ;;
+  *) echo "usage: rice on|off|toggle|status|flavour NAME|random|list|player pear|fooyin|auto|layout deck|classic|setup|button|uninstall"; exit 2 ;;
+esac

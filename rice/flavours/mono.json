@@ -1,0 +1,198 @@
+{
+  "name": "mono",
+  "order": 1,
+  "title": "MONO",
+  "blurb": "black and white, hairlines, a tight grid",
+  "light": false,
+  "mono": true,
+  "colors": {
+    "bg": "#000000",
+    "window": "#0b0b0b",
+    "button": "#1a1a1a",
+    "fg": "#f2f2f2",
+    "dim": "#9a9a9a",
+    "faint": "#4d4d4d",
+    "accent": "#ffffff",
+    "accent2": "#d0d0d0",
+    "deep": "#3a3a3a",
+    "frame_inactive": "#6a6a6a",
+    "good": "#e6e6e6",
+    "warn": "#bdbdbd",
+    "bad": "#ffffff",
+    "hi": "#ffffff"
+  },
+  "shader": [
+    "#000000",
+    "#4d4d4d",
+    "#bdbdbd",
+    "#ffffff"
+  ],
+  "ansi": [
+    "#1a1a1a",
+    "#d0d0d0",
+    "#b0b0b0",
+    "#e0e0e0",
+    "#909090",
+    "#c0c0c0",
+    "#a0a0a0",
+    "#f2f2f2",
+    "#4d4d4d",
+    "#ffffff",
+    "#d8d8d8",
+    "#ffffff",
+    "#b8b8b8",
+    "#e8e8e8",
+    "#c8c8c8",
+    "#ffffff"
+  ],
+  "shape": {
+    "gap": 2,
+    "border": 1,
+    "radius": 0,
+    "button_border": 1,
+    "brackets": [
+      "",
+      ""
+    ],
+    "bars": 1,
+    "art_mode": 0,
+    "scanlines": 0,
+    "knob": "bar",
+    "lyrics_align": "left",
+    "lyrics_upper": true,
+    "ui_font": "Monocraft",
+    "term_font_size": 8.5,
+    "cursor": "Block",
+    "clock_fill": "█",
+    "chafa": [
+      "--colors",
+      "none",
+      "--symbols",
+      "block+border+space"
+    ],
+    "player_opacity": [
+      100,
+      100
+    ]
+  },
+  "panels": {
+    "matrix": [
+      "-b",
+      "-u",
+      "7",
+      "-C",
+      "white"
+    ],
+    "lava": [
+      "-c",
+      "white",
+      "-s",
+      "3",
+      "-r",
+      "4",
+      "-b",
+      "7",
+      "-F",
+      "@#%*+=-:."
+    ],
+    "pipes": [
+      "-f",
+      "20",
+      "-p",
+      "2",
+      "-r",
+      "1500",
+      "-t",
+      "1",
+      "-C"
+    ],
+    "cava": {
+      "bar_width": 1,
+      "bar_spacing": 1,
+      "gradient": [
+        "#4d4d4d",
+        "#9a9a9a",
+        "#d0d0d0",
+        "#ffffff"
+      ]
+    }
+  },
+  "tiles": {
+    "landscape": {
+      "deck": [
+        0,
+        0,
+        0.46,
+        0.9
+      ],
+      "term": [
+        0.46,
+        0,
+        0.34,
+        0.5
+      ],
+      "player": [
+        0.46,
+        0.5,
+        0.34,
+        0.4
+      ],
+      "matrix": [
+        0.8,
+        0,
+        0.2,
+        0.45
+      ],
+      "lava": [
+        0.8,
+        0.45,
+        0.2,
+        0.45
+      ],
+      "lyrics": [
+        0,
+        0.9,
+        1,
+        0.1
+      ]
+    },
+    "portrait": {
+      "lyrics": [
+        0,
+        0,
+        1,
+        0.07
+      ],
+      "deck": [
+        0,
+        0.07,
+        1,
+        0.5
+      ],
+      "player": [
+        0,
+        0.57,
+        1,
+        0.2
+      ],
+      "term": [
+        0,
+        0.77,
+        0.58,
+        0.23
+      ],
+      "matrix": [
+        0.58,
+        0.77,
+        0.14,
+        0.23
+      ],
+      "lava": [
+        0.72,
+        0.77,
+        0.28,
+        0.23
+      ]
+    }
+  }
+}

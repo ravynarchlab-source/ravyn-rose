@@ -1,0 +1,46 @@
+name: Bug report
+description: Something does not work, looks wrong, or was not put back by rice off
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Logs can contain your user name in paths. Replace it with `USER` before pasting.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what you saw instead.
+    validations:
+      required: true
+  - type: textarea
+    id: status
+    attributes:
+      label: rice status
+      description: Output of `rice status`.
+      render: text
+  - type: textarea
+    id: log
+    attributes:
+      label: Log
+      description: The last 30 lines of `~/.local/state/rice/log`.
+      render: text
+  - type: input
+    id: flavour
+    attributes:
+      label: Flavour and layout
+      placeholder: mono, deck layout
+  - type: input
+    id: system
+    attributes:
+      label: System
+      description: Distribution, Plasma version, Wayland or X11, screen size and scaling.
+      placeholder: CachyOS, Plasma 6.8, Wayland, 1920x1080 at 125 %
+    validations:
+      required: true
+  - type: checkboxes
+    id: restore
+    attributes:
+      label: After rice off
+      options:
+        - label: My colours, wallpaper and window rules came back as they were

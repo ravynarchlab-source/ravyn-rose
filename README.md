@@ -7,7 +7,10 @@ music: synced lyrics, a player, an album-art panel drawn in ASCII, a spectrum, c
 lamp and a terminal that puts on a small show. `rice off` closes all of it and puts your
 colours, wallpaper and window rules back exactly as they were.
 
-![the five flavours in turn: mono, rose, neon, amber, paper](assets/flavours.gif)
+![the five flavours switched live, one key press each: mono, rose, neon, amber, paper](assets/flavours.gif)
+
+That is a screen recording of Meta+Alt+T pressed five times while music plays
+([the same in full quality](assets/flavours.mp4)). Nothing restarts and no window closes.
 
 Nothing autostarts and nothing is changed for good. It is a costume, not a new wardrobe.
 
@@ -16,11 +19,28 @@ Nothing autostarts and nothing is changed for good. It is a costume, not a new w
 A flavour changes the colours and the shapes: gaps, frames, buttons, the spectrum, the tile
 map, the wallpaper, even the lettering of the logo.
 
-```sh
-rice flavour mono      # or rose, neon, amber, paper
-rice flavour           # a picker
-rice flavour random
-```
+| MONO | ROSE | NEON | AMBER | PAPER |
+|---|---|---|---|---|
+| <a href="assets/mono-desktop.png"><img src="assets/mono-desktop.png" width="170" alt="MONO desktop"></a> | <a href="assets/rose-desktop.png"><img src="assets/rose-desktop.png" width="170" alt="ROSE desktop"></a> | <a href="assets/neon-desktop.png"><img src="assets/neon-desktop.png" width="170" alt="NEON desktop"></a> | <a href="assets/amber-desktop.png"><img src="assets/amber-desktop.png" width="170" alt="AMBER desktop"></a> | <a href="assets/paper-desktop.png"><img src="assets/paper-desktop.png" width="170" alt="PAPER desktop"></a> |
+
+### Switching
+
+Switching is live. The deck, the lyrics bar and the terminal showcase fade to the new colours,
+the wallpaper cross-fades, frames and gaps change, and the tiles move to the new flavour's map.
+On the laptop this was built on it takes about 0.7 to 1.1 seconds.
+
+![the flavour picker: five cards, each with a small screenshot](assets/picker.png)
+
+| Way | How |
+|---|---|
+| Key | Meta+Alt+T for the next flavour, Meta+Alt+F for the picker |
+| Picker | click or tap a card; it stays open so you can try them in turn ([in motion](assets/picker.gif)) |
+| Panel and menu | the "Rice flavour" button |
+| KRunner | type `rice mono`, `rice neon`, ... |
+| Command | `rice flavour mono`, `rice flavour next`, `rice flavour random` |
+
+The cards are sized for fingers and wrap to two columns in portrait. Every key and way to
+switch is listed in [SHORTCUTS.md](SHORTCUTS.md).
 
 ### MONO
 
@@ -229,11 +249,10 @@ you are missing.
 ## Install
 
 ```sh
-git clone https://github.com/ravynarchlab-source/ravyn-rose.git
-cd ravyn-rose
-./install.sh --dry-run     # prints every step and changes nothing
-./install.sh
+git clone https://github.com/ravynarchlab-source/ravyn-rose.git && cd ravyn-rose && ./install.sh
 ```
+
+To see every step first without changing anything, run `./install.sh --dry-run`.
 
 What the installer does, in order:
 
@@ -243,7 +262,8 @@ What the installer does, in order:
 2. Copies anything it is about to replace into `~/.local/state/ravyn-rose/backup`.
 3. Copies the rice to `~/.local/share/rice`.
 4. Downloads the Monocraft font from its own release page and checks its SHA-256.
-5. Runs `rice setup`: launchers, shortcuts, the resource-limit slice, the panel button.
+5. Runs `rice setup`: launchers, shortcuts, the resource-limit slice, the two panel buttons
+   (on/off and flavour picker), KRunner entries.
 
 Options: `--touch` adds the tablet-mode panel service, `--pen` adds pen mode for touch-only
 styluses, `--no-deps` leaves packages alone, `--no-button` skips the panel button,
@@ -261,7 +281,7 @@ rice on
 |---|---|
 | `rice on` / `rice off` | Turn it on, or put everything back |
 | `rice toggle` | Whichever applies. This is what the panel button runs |
-| `rice flavour NAME` | Switch flavour. No name opens the picker; `random` and `list` also work |
+| `rice flavour NAME` | Switch flavour, live. No name opens the picker; `next`, `random` and `list` also work |
 | `rice react on\|off\|subtle\|full` | How much the deck and the lyrics bar move with the music |
 | `rice status` | Flavour, what is running, memory and CPU time |
 | `rice player pear\|fooyin\|auto` | Which player gets the music tile |
@@ -272,12 +292,13 @@ rice on
 |---|---|
 | Meta+Alt+N | rice on |
 | Meta+Alt+O | rice off |
+| Meta+Alt+T | next flavour |
+| Meta+Alt+F | flavour picker |
 | Meta+Alt+PgUp / PgDn | Volume up / down |
 | Meta+Alt+, / . | Previous / next track |
 
 A shortcut is only registered if the key is free. If one is taken, `rice setup` leaves it
-alone and says so in `~/.local/state/rice/log`. The flavour picker is also in the application
-menu as "Rice flavour".
+alone and says so in `~/.local/state/rice/log`. The full list is in [SHORTCUTS.md](SHORTCUTS.md).
 
 Inside the deck:
 
@@ -420,15 +441,20 @@ keeps only a couple of seconds of numbers in memory, and sends nothing anywhere.
 
 ## Tested, and not
 
-Built and used on one machine: CachyOS, Plasma 6.8, Wayland, a 2-in-1 laptop at 1920 x 1080
-with 125 % scaling. All five flavours, both layouts, the portrait map and the off-and-restore
+Tested on CachyOS with KDE Plasma only. Built and used on one machine: CachyOS, Plasma 6.8,
+Wayland, a 2-in-1 laptop at 1920 x 1080 with 125 % scaling. No other distribution and no other
+desktop has been tried. All five flavours, both layouts, the portrait map and the off-and-restore
 cycle were run there; the tablet pictures above were taken with the screen folded back.
 
 - **Start-up of the terminal tile.** The showcase draws its first frame less than 100 ms after
   it starts (it logs the figure). The terminal emulator's own start comes on top of that: about
   half a second alone on this laptop, around two seconds when every panel launches at once.
-- **Album art in the terminal.** The chafa path has not been run yet on the machine this was
-  built on; so far only the built-in fallback, which draws half blocks with Pillow, has.
+- **Flavour switching.** All five were switched live there, many times, with every panel
+  staying open; the times above come from the log. The two keys were pressed by a simulated
+  keyboard, and the picker was driven by its shortcut and by its own demo mode, not by a
+  finger. The picker's portrait layout was checked by rotating the screen.
+- **Album art in the terminal** was run with chafa in all five flavours (the terminal pictures
+  above). The fallback without chafa, half blocks drawn with Pillow, was run earlier.
 - **The installer** has been run as a dry run and into an empty home folder, then uninstalled
   again with the earlier files coming back. It has not yet been run on a freshly installed
   system, so read the dry run before you trust it.

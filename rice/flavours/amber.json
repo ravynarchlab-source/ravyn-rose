@@ -72,6 +72,10 @@
     "player_opacity": [
       94,
       90
+    ],
+    "chafa_tint": [
+      "#140a00",
+      "#ffd27a"
     ]
   },
   "panels": {

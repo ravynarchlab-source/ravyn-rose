@@ -66,14 +66,15 @@
     "clock_fill": "●",
     "chafa": [
       "--symbols",
-      "block+border+space",
-      "--invert",
-      "--colors",
-      "none"
+      "block+border+space"
     ],
     "player_opacity": [
       96,
       94
+    ],
+    "chafa_tint": [
+      "#f3ecdc",
+      "#1c1a17"
     ]
   },
   "panels": {

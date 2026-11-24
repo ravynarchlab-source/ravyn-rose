@@ -43,6 +43,14 @@ def load_theme():
 
 
 TH = load_theme()
+KV = os.path.join(TH["dir"], "showcase.kv")
+
+
+def kv_stamp():
+    try:
+        return os.stat(KV).st_mtime_ns
+    except OSError:
+        return 0
 
 
 def col(h):
@@ -227,6 +235,19 @@ def art_lines(path, w, h):
     if key in _art_cache:
         return _art_cache[key]
     lines = []
+    tint = TH.get("tint", "").split()
+    if len(tint) == 2 and which("chafa"):                  # one-colour flavour: map the cover onto its two colours first
+        try:
+            import site
+            site.main()                                    # Pillow lives in site-packages (-S skipped it)
+            from PIL import Image, ImageOps
+            grey = ImageOps.autocontrast(Image.open(path).convert("L"), cutoff=1)
+            os.makedirs(RUN, exist_ok=True)
+            tinted = os.path.join(RUN, "showcase-art.png")
+            ImageOps.colorize(grey, black=tint[0], white=tint[1]).resize((320, 320)).save(tinted)
+            path = tinted
+        except Exception:
+            pass                                           # no Pillow: chafa draws the cover as it is
     if which("chafa"):
         out = run(["chafa", "--format", "symbols", "--animate", "off", "--polite", "on", "--size", "%dx%d" % (w, h),
                    *TH.get("chafa", "").split(), path])
@@ -331,6 +352,7 @@ def pinned():
 
 
 def main():
+    global TH, C_HI, C_DIM, C_FAINT, C_ACC
     import select, termios, tty
     if not sys.stdin.isatty():
         sys.exit("showcase needs a terminal")
@@ -339,6 +361,7 @@ def main():
     old = termios.tcgetattr(fd)
     order, k, tick, first = pages(), 0, 0, True
     head, head_at, head_cols = [], 0.0, 0
+    stamp = kv_stamp()
     page_at = time.monotonic()
     leave = False
     try:
@@ -350,6 +373,15 @@ def main():
             except OSError:
                 cols, rows = 80, 24
             now = time.monotonic()
+            if kv_stamp() != stamp:                            # `rice flavour` switched: new colours, logo and facts
+                try:
+                    TH = load_theme()
+                    C_HI, C_DIM, C_FAINT, C_ACC = (col(TH[k2]) for k2 in ("hi", "dim", "faint", "accent"))
+                    stamp, head = kv_stamp(), []
+                    _art_cache.clear()
+                    sys.stdout.write("\x1b[2J")
+                except (OSError, KeyError, ValueError):
+                    pass                                       # caught half written: the next tick has it
             if not head or cols != head_cols or now - head_at > 60:
                 head, head_cols = header(cols, fresh=not first), cols
                 head_at = now if not first else now - 58       # the advance copy is replaced a moment later

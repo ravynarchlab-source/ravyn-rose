@@ -6,7 +6,8 @@
 #   rice status     show what is running and its CPU / RAM
 #   rice player pear|fooyin|auto   which player takes the music tile (default auto: Pear if running, else fooyin)
 #   rice layout deck|classic       centre tile: the ASCII DECK (default), or the cava + pipes terminals
-#   rice flavour NAME|random|list  switch flavour (mono, rose, neon, amber, paper); no name opens the picker
+#   rice flavour NAME|next|random|list   switch flavour (mono, rose, neon, amber, paper) while everything keeps
+#                   running; no name opens the picker (cards with a screenshot of each flavour)
 #   rice react on|off|subtle|full  how much the deck and the lyrics bar move with the music (default full)
 #   rice react offset MS           show everything MS milliseconds later (+) or earlier (-), if it looks off
 #   rice setup      one-time: systemd slice, launchers, Meta+Alt+N (on) / Meta+Alt+O (off) (no autostart)
@@ -215,6 +216,19 @@ shell_panel() {  # the terminal tile: the ASCII showcase (Enter drops to a shell
   else term term env RICE_T0="$(date +%s%N)" python3 -S "$R/showcase/showcase.py" "$FL/theme.json"; fi
 }
 
+panel() {  # name program: a terminal panel whose window survives flavour changes (panel.sh restarts the program in it)
+  have "$2" || { log "no $1 panel: $2 is not installed"; return 0; }
+  term "$1" bash "$R/panel.sh" "$1" "$FL" "$RUNDIR"
+}
+retheme_panels() {  # the deck, the lyrics bar and the showcase watch the files in $FL and alacritty reloads its
+  # colours by itself; only the programs inside the other terminals have to be started again (same windows)
+  local p
+  for p in "$RUNDIR"/panel-*.pid; do
+    [ -f "$p" ] && kill -USR1 "$(cat "$p")" 2>/dev/null
+  done
+  return 0
+}
+
 player_mode() { local m; m=$(cat "$RCFG/player" 2>/dev/null); case "$m" in pear|fooyin) echo "$m" ;; *) echo auto ;; esac; }
 layout_mode() { local m; m=$(cat "$RCFG/layout" 2>/dev/null); case "$m" in classic) echo classic ;; *) echo deck ;; esac; }
 react_mode() { local m; m=$(cat "$RCFG/react" 2>/dev/null); case "$m" in off|subtle|full) echo "$m" ;; *) echo full ;; esac; }
@@ -287,14 +301,14 @@ start_panels() {  # panels that are already running are left alone
   launch lyrics /usr/bin/python3 "$R/lyricswin.py" "$FL/theme.json" "$RCACHE/now.json"
   ensure_player
   if [ "$(layout_mode)" = classic ]; then                 # two terminals in the centre: spectrum and pipes
-    term cava  cava -p "$FL/cava.conf"
-    term pipes pipes.sh "${FL_PIPES[@]}"
+    panel cava  cava
+    panel pipes pipes.sh
   else                                                    # ASCII DECK: art, controls, spectrum
     { [ -f "$R/deck/ascii.frag.qsb" ] && [ -f "$R/deck/spectrum.frag.qsb" ]; } || compile_shaders
     launch deck /usr/bin/python3 "$R/deck/deck.py" "$FL/theme.json"
   fi
-  term matrix cmatrix "${FL_MATRIX[@]}"
-  term lava   lavat "${FL_LAVA[@]}"
+  panel matrix cmatrix
+  panel lava   lavat
   # KWin's own initial placement can win over the tiler for brand-new windows: tile again once they are up
   sleep 2; load_tiler; sleep 2; load_tiler
 }
@@ -369,13 +383,22 @@ rice_react() {
   if is_on; then start_react; fi                          # the panels read the new level within a second
 }
 rice_flavour() {
-  local want=${1:-} out="$ST/pick" picked="" level
+  local want=${1:-} out="$ST/pick" picked="" level t0
   case "$want" in
     list) python3 "$R/flavour.py" list; return ;;
     show) echo "flavour: $(flavour_name)"; return ;;
-    random) want=$(python3 "$R/flavour.py" random) ;;
-    ""|pick)                                              # the picker: here if this is a terminal, else its own window
-      rm -f "$out"; flock -u 9
+    random|next|prev) want=$(python3 "$R/flavour.py" "$want") ;;
+    ""|pick)                                              # the picker: cards with a screenshot of each flavour
+      flock -u 9
+      if [ -n "${WAYLAND_DISPLAY:-}${DISPLAY:-}" ] && python3 -c 'import importlib.util as u, sys; sys.exit(u.find_spec("PySide6") is None)' 2>/dev/null; then
+        # its own unit, outside rice.slice (so it also works while the rice is off); a second call finds it running
+        systemd-run --user --quiet --collect --unit=flavour-picker --working-directory="$HOME" \
+          -- /usr/bin/python3 "$R/picker/picker.py" 2>/dev/null || true
+        return
+      fi
+      ;&
+    tui)                                                  # the same choice as text: here if this is a terminal, else its own window
+      rm -f "$out"; flock -u 9 2>/dev/null
       if [ -t 0 ] && [ -t 1 ]; then python3 "$R/flavour.py" pick "$out"
       elif have alacritty; then
         alacritty --class rice-picker --title "rice flavour" -o window.dimensions.columns=78 -o window.dimensions.lines=11 \
@@ -392,13 +415,16 @@ rice_flavour() {
     *" $want "*) ;;
     *) echo "unknown flavour: $want"; python3 "$R/flavour.py" list; exit 2 ;;
   esac
-  mkdir -p "$RCFG"; echo "$want" > "$RCFG/flavour"; log "flavour: $want"
-  if is_on; then                                          # new look and fresh panels; the saved original look is kept
-    stop_panels
-    apply_look
-    load_tiler
-    start_panels
-    notify "flavour: $want"
+  [ "$want" != "$(flavour_name)" ] || { echo "flavour: $want (already in use)"; return; }
+  t0=$(date +%s%N)
+  mkdir -p "$RCFG"; echo "$want" > "$RCFG/flavour"
+  if is_on; then                                          # everything keeps running; the saved original look is kept
+    apply_look                                            # colours, wallpaper, frames; terminals recolour themselves
+    load_tiler                                            # the flavour's tile map and gaps
+    retheme_panels
+    log "flavour: $want (applied live in $(( ($(date +%s%N) - t0) / 1000000 )) ms)"
+  else
+    log "flavour: $want (used the next time the rice turns on)"
   fi
 }
 
@@ -450,16 +476,6 @@ Icon=preferences-desktop-color
 Terminal=false
 Categories=Utility;
 EOF
-  cat > "$APPS/rice-flavour.desktop" <<EOF
-[Desktop Entry]
-Type=Application
-Name=Rice flavour
-Comment=Pick the rice flavour (mono, rose, neon, amber, paper)
-Exec=$HOME/.local/bin/rice flavour pick --from=launcher
-Icon=preferences-desktop-color
-Terminal=false
-Categories=Utility;
-EOF
   # Meta+Alt+N = 0x1800004E, Meta+Alt+O = 0x1800004F (Qt key codes); flags 6 = SetPresent|NoAutoloading.
   # (Meta+Shift+R and Meta+Alt+R are Spectacle's recording defaults: never use them.)
   for pair in "on:402653262" "off:402653263"; do
@@ -470,13 +486,70 @@ EOF
       --method org.kde.KGlobalAccel.setShortcut "['rice-$a.desktop', '_launch', 'Rice $a', 'Rice $a']" "[$k]" 6 >/dev/null
   done
   kbuildsycoca6 >/dev/null 2>&1 || true   # make KDE pick up the launchers' current Exec= line
+  flavour_setup
   deck_setup
   log "setup done: Meta+Alt+N = rice on, Meta+Alt+O = rice off (no autostart)"
 }
 
-# ---------- the "Rice" button on the Plasma panel ----------
+# ---------- flavours: picker launcher, KRunner entries, two keys ----------
+# Meta+Alt+T = next flavour, Meta+Alt+F = the picker (Qt key codes below). Each key is set only if it is free.
+# (Meta+Shift+letter was tried first and did not reach the launcher on the machine this was built on.)
+FLAVOUR_KEYS="rice-flavour-next:402653268:Rice next flavour
+rice-flavour:402653254:Rice flavour"
+
+flavour_setup() {
+  local bin="$HOME/.local/bin/rice" name key title owner n actions=""
+  [ "$R" = "$INSTALLED" ] || bin="$R/rice"                # run from a clone: the launchers point at the clone
+  mkdir -p "$APPS"
+  for n in $(python3 "$R/flavour.py" names); do actions="$actions$n;"; done
+  {                                                       # the picker; its actions are what KRunner finds for "rice mono"
+    printf '%s\n' '[Desktop Entry]' 'Type=Application' 'Name=Rice flavour' \
+      'Comment=Pick the rice flavour from cards with a screenshot of each' "Exec=$bin flavour pick --from=launcher" \
+      'Icon=preferences-desktop-theme-global' 'Terminal=false' 'Categories=Utility;' 'Keywords=rice;flavour;flavor;theme;' \
+      'X-KDE-GlobalAccel-CommandShortcut=true' "Actions=${actions}next;"
+    for n in $(python3 "$R/flavour.py" names); do
+      printf '%s\n' '' "[Desktop Action $n]" "Name=Rice $n" "Exec=$bin flavour $n --from=krunner" 'Icon=preferences-desktop-color'
+    done
+    printf '%s\n' '' '[Desktop Action next]' 'Name=Rice next flavour' "Exec=$bin flavour next --from=krunner" 'Icon=preferences-desktop-color'
+  } > "$APPS/rice-flavour.desktop"
+  printf '%s\n' '[Desktop Entry]' 'Type=Application' 'Name=Rice next flavour' "Exec=$bin flavour next --from=shortcut" \
+    'Icon=preferences-desktop-color' 'NoDisplay=true' 'X-KDE-GlobalAccel-CommandShortcut=true' > "$APPS/rice-flavour-next.desktop"
+  kbuildsycoca6 >/dev/null 2>&1 || true
+  while IFS=: read -r name key title <&3; do
+    [ -n "$name" ] || continue
+    owner=$(gdbus call --session --dest org.kde.kglobalaccel --object-path /kglobalaccel \
+        --method org.kde.KGlobalAccel.actionList "([$key,0,0,0],)" 2>/dev/null </dev/null)
+    case "$owner" in
+      *"@as []"*|*"$name.desktop"*)
+        gdbus call --session --dest org.kde.kglobalaccel --object-path /kglobalaccel \
+          --method org.kde.KGlobalAccel.doRegister "['$name.desktop', '_launch', '$title', '$title']" >/dev/null </dev/null
+        gdbus call --session --dest org.kde.kglobalaccel --object-path /kglobalaccel \
+          --method org.kde.KGlobalAccel.setShortcut "['$name.desktop', '_launch', '$title', '$title']" "[$key]" 6 >/dev/null </dev/null ;;
+      *) log "flavour: the key for '$title' is taken ($owner): not set" ;;
+    esac
+  done 3<<< "$FLAVOUR_KEYS"
+  log "flavour: launchers set (Meta+Alt+T next flavour, Meta+Alt+F picker, KRunner: rice mono ...)"
+}
+
+flavour_remove() {
+  local name key title
+  systemctl --user stop flavour-picker 2>/dev/null
+  while IFS=: read -r name key title <&3; do
+    [ -n "$name" ] || continue
+    gdbus call --session --dest org.kde.kglobalaccel --object-path /kglobalaccel \
+      --method org.kde.KGlobalAccel.unregister "$name.desktop" "_launch" >/dev/null 2>&1 </dev/null
+    kwriteconfig6 --file kglobalshortcutsrc --group "services" --group "$name.desktop" --key _launch --delete
+    [ -f "$C/kglobalshortcutsrc" ] && sed -i "/^\\[services\\]\\[$name\\.desktop\\]\$/,/^\$/d" "$C/kglobalshortcutsrc"
+    rm -f "${APPS:?}/${name:?}.desktop"
+  done 3<<< "$FLAVOUR_KEYS"
+  kbuildsycoca6 >/dev/null 2>&1 || true
+}
+
+# ---------- the "Rice" buttons on the Plasma panel ----------
+# rice button           the on/off toggle          rice button flavour   the flavour picker
 BUTTON_FILE="${RICE_BUTTON_FILE:-$APPS/rice-toggle.desktop}"   # (the override exists only to test this on a throwaway file)
 rice_button() {
+  [ "${1:-}" = flavour ] && BUTTON_FILE="$APPS/rice-flavour.desktop"
   [ -f "$BUTTON_FILE" ] || { echo "no launcher at $BUTTON_FILE yet: run rice setup first" >&2; exit 1; }
   pjs 'var f="'"$BUTTON_FILE"'", n=f.split("/").pop(), there=false;
        panels().forEach(function(p){ p.widgets("org.kde.plasma.icon").forEach(function(w){
@@ -564,8 +637,10 @@ rice_uninstall() {
     rm -f "$APPS/rice-$a.desktop"
   done
   [ -f "$C/kglobalshortcutsrc" ] && sed -i '/^\[services\]\[rice-\(on\|off\)\.desktop\]$/,/^$/d' "$C/kglobalshortcutsrc"
-  button_remove                                           # panel button, then the launchers
-  rm -f "$APPS/rice-toggle.desktop" "$APPS/rice-flavour.desktop" "$HOME/Desktop/rice-toggle.desktop"
+  button_remove                                           # panel buttons, then the launchers
+  BUTTON_FILE="$APPS/rice-flavour.desktop"; button_remove
+  flavour_remove
+  rm -f "$APPS/rice-toggle.desktop" "$HOME/Desktop/rice-toggle.desktop"
   kbuildsycoca6 >/dev/null 2>&1 || true
   rm -f "$SLICE_FILE"; systemctl --user daemon-reload
   rm -f "$HOME/.local/bin/rice"
@@ -584,9 +659,11 @@ case "${1:-status}" in
   toggle) if is_on; then log "toggle: rice is on -> off"; rice_off; else log "toggle: rice is off -> on"; rice_on; fi ;;
   status) rice_status ;;
   setup) rice_setup ;;
-  button) rice_button ;;
+  button) rice_button "${2:-}" ;;
+  flavour-setup) flavour_setup ;;            # internal: flavour launchers, KRunner entries and keys only
+  flavour-remove) flavour_remove ;;          # internal: remove those
   button-remove) button_remove ;;            # internal: remove only the panel button
   deck-setup) only_installed deck-setup; deck_setup ;;   # internal: compile shaders + global shortcuts only
   uninstall) rice_uninstall ;;
-  *) echo "usage: rice on|off|toggle|status|flavour NAME|random|list|react on|off|subtle|full|player pear|fooyin|auto|layout deck|classic|setup|button|uninstall"; exit 2 ;;
+  *) echo "usage: rice on|off|toggle|status|flavour [NAME|next|random|list]|react on|off|subtle|full|player pear|fooyin|auto|layout deck|classic|setup|button|uninstall"; exit 2 ;;
 esac

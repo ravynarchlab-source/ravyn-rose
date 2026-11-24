@@ -4,6 +4,7 @@
     flavour.py list                     names in menu order (the current one is marked)
     flavour.py current                  the flavour in use
     flavour.py random                   a flavour other than the current one
+    flavour.py next | prev              the neighbour of the current one in menu order
     flavour.py build NAME OUTDIR        write everything `rice on` needs for NAME into OUTDIR:
                                         two KDE colour schemes, alacritty.toml, cava.conf, fastfetch.jsonc,
                                         theme.json (read by the deck, the lyrics bar and the showcase), env.sh
@@ -152,7 +153,7 @@ def build(name, out):
     (out / "theme.json").write_text(json.dumps(theme, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
     # the showcase reads this instead of theme.json: no JSON parser before its first frame
     kv = dict(name=name, hi=theme["hi"], dim=theme["dim"], faint=theme["faint"], accent=theme["accent"],
-              clock_fill=theme["clock_fill"], chafa=" ".join(theme["chafa"]), mono=int(f["mono"]), light=int(f["light"]),
+              clock_fill=theme["clock_fill"], chafa=" ".join(theme["chafa"]), tint=" ".join(theme.get("chafa_tint") or []), mono=int(f["mono"]), light=int(f["light"]),
               fastfetch=theme["fastfetch"], scenes=theme["scenes"])
     (out / "showcase.kv").write_text("".join(f"{k}\t{v}\n" for k, v in kv.items()), encoding="utf-8")
     for old in out.glob("header-*.ans"):                       # rendered again by rice for this flavour
@@ -254,6 +255,9 @@ def main(a):
         print(" ".join(names()))
     elif cmd == "current":
         print(current())
+    elif cmd in ("next", "prev"):                      # the neighbour in menu order, wrapping round
+        ns = names()
+        print(ns[(ns.index(current()) + (1 if cmd == "next" else -1)) % len(ns)])
     elif cmd == "random":
         print(random.choice([n for n in names() if n != current()] or names()))
     elif cmd == "build":

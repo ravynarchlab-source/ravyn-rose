@@ -20,11 +20,18 @@ Window {
 
     readonly property real dpr: Screen.devicePixelRatio
     // colours and shapes of the flavour in use (theme.json, handed over by deck.py)
-    readonly property color cPanel: theme.bg
-    readonly property color cRose: theme.accent
-    readonly property color cBlush: theme.hi
-    readonly property color cDim: theme.dim
-    readonly property color cFaint: theme.faint
+    // They are not constants: `rice flavour` swaps the theme while the deck runs, and the colours fade over.
+    property color cPanel: theme.bg
+    property color cRose: theme.accent
+    property color cBlush: theme.hi
+    property color cDim: theme.dim
+    property color cFaint: theme.faint
+    readonly property int fade: backend.reducedMotion ? 0 : 420
+    Behavior on cPanel { ColorAnimation { duration: win.fade } }
+    Behavior on cRose { ColorAnimation { duration: win.fade } }
+    Behavior on cBlush { ColorAnimation { duration: win.fade } }
+    Behavior on cDim { ColorAnimation { duration: win.fade } }
+    Behavior on cFaint { ColorAnimation { duration: win.fade } }
     readonly property string uiFont: theme.ui_font
     readonly property bool playing: backend.status === "Playing"
 
@@ -268,6 +275,10 @@ Window {
                 property color c1: theme.shader[1]
                 property color c2: theme.shader[2]
                 property color c3: theme.shader[3]
+                Behavior on c0 { ColorAnimation { duration: win.fade } }
+                Behavior on c1 { ColorAnimation { duration: win.fade } }
+                Behavior on c2 { ColorAnimation { duration: win.fade } }
+                Behavior on c3 { ColorAnimation { duration: win.fade } }
                 property real mono: theme.mono ? 1 : 0
                 property real invert: theme.light ? 1 : 0
                 property real scan: theme.scanlines

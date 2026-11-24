@@ -65,14 +65,16 @@
     "cursor": "Block",
     "clock_fill": "█",
     "chafa": [
-      "--colors",
-      "none",
       "--symbols",
       "block+border+space"
     ],
     "player_opacity": [
       100,
       100
+    ],
+    "chafa_tint": [
+      "#000000",
+      "#ffffff"
     ]
   },
   "panels": {

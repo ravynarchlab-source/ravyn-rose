@@ -52,6 +52,7 @@ def load_theme():
 
 
 THEME = load_theme()
+THEME_PATH = sys.argv[1] if len(sys.argv) > 1 and os.path.isfile(sys.argv[1]) else str(RUN / "flavour" / "theme.json")
 SETTINGS = CONFIG / f"deck-{THEME['name']}.json"      # art mode, zoom and fill are remembered per flavour
 SINK = "@DEFAULT_AUDIO_SINK@"
 
@@ -162,6 +163,7 @@ class Backend(QObject):
     stateChanged = Signal()
     volumeChanged = Signal()
     settingsChanged = Signal()
+    themeChanged = Signal()                 # the flavour was switched while the deck runs
     atlasChanged = Signal()
     artReady = Signal(str, bool)            # texture url ("" = none), is it a new track (animate)?
     trackChanged = Signal()                 # show the title banner
@@ -197,6 +199,11 @@ class Backend(QObject):
         self._zoom = 2 if s.get("zoom") == 2 else 1
         self._fill = bool(s.get("fill", True))
         self._atlas = {z: build_atlas(z) for z in (1, 2)}
+        self.engine = None                                # set by main(); needed to hand a new theme to the window
+        self._theme_stamp = self._theme_mtime()
+        self._theme_timer = QTimer(self)
+        self._theme_timer.timeout.connect(self._theme_check)
+        self._theme_timer.start(300)
         self._title = self._artist = self._status = self._player = self._inst = ""
         self._pos = self._len = 0.0
         self._can_seek = False
@@ -243,7 +250,39 @@ class Backend(QObject):
     testWindow = Property(bool, lambda s: TEST_WINDOW, constant=True)
     amount = Property(float, lambda s: s._amount, notify=reactChanged)        # 0 off, 0.45 subtle, 1 full
     reducedMotion = Property(bool, lambda s: s._reduced, notify=reactChanged)
-    fx = Property(int, lambda s: FX.get(THEME.get("react", THEME["name"]), 1), constant=True)
+    fx = Property(int, lambda s: FX.get(THEME.get("react", THEME["name"]), 1), notify=themeChanged)
+
+    # ------------------------------------------------------------ flavour changed while running
+    def _theme_mtime(self):
+        try:
+            return os.stat(THEME_PATH).st_mtime_ns
+        except OSError:
+            return 0
+
+    def _theme_check(self):
+        """`rice flavour NAME` rewrites theme.json: take its colours and shapes without restarting.
+        Setting the context property again makes every binding in Deck.qml that uses `theme` update."""
+        global THEME, SETTINGS
+        stamp = self._theme_mtime()
+        if not stamp or stamp == self._theme_stamp:
+            return
+        try:
+            new = json.loads(Path(THEME_PATH).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return                                        # caught half written: the next tick has it
+        self._theme_stamp = stamp
+        THEME = new
+        SETTINGS = CONFIG / f"deck-{THEME['name']}.json"
+        s = {}
+        try:
+            s = json.loads(SETTINGS.read_text())
+        except Exception:
+            pass
+        self._mode = s.get("mode") if s.get("mode") in (0, 1, 2, 3) else int(THEME.get("art_mode", 0))
+        if self.engine is not None:
+            self.engine.rootContext().setContextProperty("theme", THEME)
+        self.themeChanged.emit()
+        self.settingsChanged.emit()
 
     # ------------------------------------------------------------ player state (once a second)
     def _poll_loop(self):
@@ -627,6 +666,7 @@ def main():
     engine = QQmlApplicationEngine()
     engine.rootContext().setContextProperty("backend", backend)
     engine.rootContext().setContextProperty("theme", THEME)
+    backend.engine = engine
     engine.load(QUrl.fromLocalFile(str(HERE / "Deck.qml")))
     if not engine.rootObjects():
         backend.shutdown()

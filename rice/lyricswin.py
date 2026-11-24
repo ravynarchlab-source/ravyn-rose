@@ -94,6 +94,21 @@ def main():
     engine.load(QUrl.fromLocalFile(str(HERE / "lyrics.qml")))
     if not engine.rootObjects():
         sys.exit(1)
+    theme_path, stamp = sys.argv[1], [os.stat(sys.argv[1]).st_mtime_ns]
+
+    def retheme():                                        # `rice flavour` rewrote theme.json: take it without restarting
+        try:
+            now = os.stat(theme_path).st_mtime_ns
+            if now == stamp[0]:
+                return
+            new = json.loads(Path(theme_path).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        stamp[0] = now
+        engine.rootContext().setContextProperty("theme", new)
+    watch = QTimer()
+    watch.timeout.connect(retheme)
+    watch.start(300)
     grab = os.environ.get("RICE_LYRICS_GRAB")            # debug: save what the window shows, 8 times a second
     if grab:
         win, n = engine.rootObjects()[0], [0]

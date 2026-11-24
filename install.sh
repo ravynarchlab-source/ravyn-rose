@@ -105,7 +105,7 @@ fi
 # ---------------------------------------------------------------- backup
 step "Backing up what will be replaced"
 targets=("$INSTALLED" "$BIN/rice" "$FONTS" "$UNITS/rice.slice")
-for n in on off toggle flavour deck vol-up vol-down prev next; do targets+=("$APPS/rice-$n.desktop"); done
+for n in on off toggle flavour flavour-next deck vol-up vol-down prev next; do targets+=("$APPS/rice-$n.desktop"); done
 [ "$TOUCH" = 1 ] && targets+=("$BIN/touch-mode-panel" "$UNITS/touch-mode-panel.service")
 if [ -f "$MANIFEST" ]; then
   note "earlier install found: keeping the first backup in $BACKUP"
@@ -142,7 +142,7 @@ step "Copying the rice to $INSTALLED"
 run rm -rf "$INSTALLED"
 run mkdir -p "$INSTALLED"
 run cp -a "$HERE/rice/." "$INSTALLED/"
-run chmod 755 "$INSTALLED/rice" "$INSTALLED/flavour.py" "$INSTALLED/lyrics.py" "$INSTALLED/deck/deck.py" \
+run chmod 755 "$INSTALLED/rice" "$INSTALLED/panel.sh" "$INSTALLED/picker/picker.py" "$INSTALLED/flavour.py" "$INSTALLED/lyrics.py" "$INSTALLED/deck/deck.py" \
   "$INSTALLED/deck/ctl.py" "$INSTALLED/showcase/showcase.py"
 
 step "Monocraft font (downloaded from its release page, not shipped here)"
@@ -172,6 +172,7 @@ if [ "$SETUP" = 1 ]; then
   if [ "$DRY" = 1 ] || qdbus6 org.kde.KWin /KWin >/dev/null 2>&1; then
     run "$INSTALLED/rice" setup
     [ "$BUTTON" = 1 ] && run "$INSTALLED/rice" button
+    [ "$BUTTON" = 1 ] && run "$INSTALLED/rice" button flavour
   else
     note "No running Plasma session found. After you log in to Plasma, run:"
     note "  $INSTALLED/rice setup && $INSTALLED/rice button"

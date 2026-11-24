@@ -33,6 +33,7 @@ function role(w, kind) {
 function place(w, kind) {
   const r = role(w, kind);
   if (!r) return;
+  if (r === "picker") { w.keepAbove = true; return; }     // the flavour picker: never tiled, never behind a tile
   const a = workspace.clientArea(KWin.MaximizeArea, workspace.activeScreen, workspace.currentDesktop);
   const f = (a.height > a.width ? TILES.portrait : TILES.landscape)[r];
   if (!f) return;

@@ -14,10 +14,15 @@ Window {
     visible: true
     width: 1200; height: 110
     readonly property var th: theme
-    readonly property color cBg: th.bg
-    readonly property color cHi: th.hi
-    readonly property color cDim: th.dim
-    readonly property color cAccent: th.accent
+    property color cBg: th.bg                         // not constants: they fade over when the flavour is switched
+    property color cHi: th.hi
+    property color cDim: th.dim
+    property color cAccent: th.accent
+    readonly property int fade: backend.reducedMotion ? 0 : 420
+    Behavior on cBg { ColorAnimation { duration: win.fade } }
+    Behavior on cHi { ColorAnimation { duration: win.fade } }
+    Behavior on cDim { ColorAnimation { duration: win.fade } }
+    Behavior on cAccent { ColorAnimation { duration: win.fade } }
     color: Qt.rgba(cBg.r, cBg.g, cBg.b, 0.72)     // translucent panel; the KWin border rule adds the frame
 
     readonly property var st: backend.state

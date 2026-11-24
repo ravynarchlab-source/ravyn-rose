@@ -7,7 +7,10 @@ What it does
   * turns the player's cover art (mpris:artUrl; https art is cached in ~/.cache/rice/art by lyrics.py)
     into a small texture: cropped to the tile, contrast-corrected, sharpened, 2 x 4 texels per character
     cell. The shader ascii.frag draws the characters from it. No video is downloaded or streamed;
-  * runs one cava in raw mode writing to a FIFO and turns it into 32 spectrum bars and a beat envelope;
+  * moves with the music: bass, loudness, beats and the 32 spectrum bars come from the shared analyser
+    (react/analyser.py, read through react/client.py), the same clock the lyrics bar uses. While music
+    plays and `rice react` is not off, the window draws every display frame; otherwise 15 times a second
+    or less;
   * controls: play/pause, previous/next, seek through MPRIS (playerctl); volume and mute through
     PipeWire (wpctl), clamped to 0-100 %;
   * listens on a datagram socket for the global shortcuts (deck/ctl.py).
@@ -25,14 +28,16 @@ from PySide6.QtQuick import QQuickWindow
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
 import lyrics as mpris                                    # noqa: E402  (poll, choose, art_file)
+from react import client as react                         # noqa: E402  (the shared analyser's reading side)
 
 RUN = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / "rice"
 TEX = RUN / "deck"                                        # textures for the shader (tmpfs)
-SOCK, FIFO, CAVA_CONF = RUN / "deck.sock", RUN / "cava.fifo", RUN / "cava-deck.conf"
+SOCK, STATS = RUN / "deck.sock", RUN / "deck.stats"
 CONFIG = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "rice"
 MONOCRAFT = Path.home() / ".local/share/fonts/rice/Monocraft.otf"   # put there by install.sh
-NBARS = 32
 DEBUG = bool(os.environ.get("RICE_DECK_DEBUG"))          # extra logging and the test-event injector
+MEASURE = DEBUG or bool(os.environ.get("RICE_DECK_STATS"))   # frame rate and lag, written to deck.stats every 2 s
+FX = {"mono": 0, "rose": 1, "neon": 2, "amber": 3, "paper": 4}      # the reaction each flavour has (ascii.frag)
 TEST_WINDOW = bool(os.environ.get("RICE_DECK_TEST"))     # window never takes focus or real input (testing)
 MODES = ["classic", "blocks", "braille", "tinted"]
 
@@ -141,6 +146,12 @@ def render_art(src, cols, rows, zoom, fill, out):
     canvas = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     canvas.paste(im.convert("RGBA"), (ox, oy))
     canvas.save(out, compress_level=1)
+    # one texel per cell: the cell's average in a single read, and a cheap blur for glow and edges
+    canvas.resize((cols, rows), Image.BOX).save(low_path(out), compress_level=1)
+
+
+def low_path(path):
+    return str(path)[:-4] + "-low.png"
 
 
 def local_path(uri):
@@ -155,16 +166,26 @@ class Backend(QObject):
     artReady = Signal(str, bool)            # texture url ("" = none), is it a new track (animate)?
     trackChanged = Signal()                 # show the title banner
     volumeShown = Signal()                  # show the volume OSD
+    volumeRipple = Signal(int)              # +1 louder, -1 quieter: a wave crosses the deck
+    reactChanged = Signal()
     bannerShown = Signal(str, str)
     _mprisIn = Signal(object)
     _volIn = Signal(int, bool)
     _artIn = Signal(str, int)
     _cmdIn = Signal(str)
     _seekable = Signal(str, bool)
+    _reactIn = Signal(float, bool)
 
     def __init__(self):
         super().__init__()
         TEX.mkdir(parents=True, exist_ok=True)
+        self._reader = react.Reader()
+        self._reduced = react.reduced_motion()
+        self._amount = react.amount()
+        self._fake = None                   # (debug) a pretend player, so the window can be tested without one
+        self._stat = dict(swaps=[], age=[], build=[], beat=[], t0=time.monotonic())
+        self._built_at = self._beat_due = 0.0
+        self._beats_seen = 0
         for old in TEX.glob("art-*.png"):
             old.unlink(missing_ok=True)
         s = {}
@@ -190,14 +211,8 @@ class Backend(QObject):
         v = read_volume() or (50, False)
         self._volume, self._muted = v
         self._vol_set_at = 0.0
-        self._bars = [0.0] * NBARS
-        self._beat = 0.0
-        self._bass_avg = self._bass_prev = 0.0
-        self._frame_at = 0.0
-        self._lock = threading.Lock()
         self._stop = threading.Event()
         self._wake = threading.Event()
-        self._cava = None
         self.window = None
         self._pool = ThreadPoolExecutor(max_workers=2)
         self._mprisIn.connect(self._on_mpris, Qt.QueuedConnection)
@@ -205,7 +220,8 @@ class Backend(QObject):
         self._artIn.connect(self._on_art, Qt.QueuedConnection)
         self._cmdIn.connect(self.command, Qt.QueuedConnection)
         self._seekable.connect(self._on_seekable, Qt.QueuedConnection)
-        for target in (self._poll_loop, self._cava_loop, self._sock_loop):
+        self._reactIn.connect(self._on_react, Qt.QueuedConnection)
+        for target in (self._poll_loop, self._sock_loop):
             threading.Thread(target=target, daemon=True).start()
 
     # ------------------------------------------------------------ properties for QML
@@ -225,25 +241,40 @@ class Backend(QObject):
     atlasUrl = Property(str, lambda s: QUrl.fromLocalFile(str(s._atlas[s._zoom][0])).toString(), notify=settingsChanged)
     nGlyphs = Property(int, lambda s: s._atlas[s._zoom][1], notify=settingsChanged)
     testWindow = Property(bool, lambda s: TEST_WINDOW, constant=True)
+    amount = Property(float, lambda s: s._amount, notify=reactChanged)        # 0 off, 0.45 subtle, 1 full
+    reducedMotion = Property(bool, lambda s: s._reduced, notify=reactChanged)
+    fx = Property(int, lambda s: FX.get(THEME.get("react", THEME["name"]), 1), constant=True)
 
     # ------------------------------------------------------------ player state (once a second)
     def _poll_loop(self):
         while not self._stop.is_set():
             try:
-                cur = mpris.choose(mpris.poll())
+                cur = mpris.choose(mpris.poll(), self._inst)   # stays with the player it follows while that is paused
                 if cur:
                     cur = dict(cur, art_local=local_path(mpris.art_file(cur["art"])))
                 self._mprisIn.emit(cur)
                 v = read_volume()
                 if v:
                     self._volIn.emit(*v)
+                self._reactIn.emit(react.amount(), react.reduced_motion())   # `rice react ...` takes effect within a second
             except Exception as e:                        # never let the panel die on a bad poll
                 print(f"[deck] poll: {e}", file=sys.stderr)
             self._wake.wait(1.0)
             self._wake.clear()
 
+    @Slot(float, bool)
+    def _on_react(self, amount, reduced):
+        if (amount, reduced) != (self._amount, self._reduced):
+            self._amount, self._reduced = amount, reduced
+            self.reactChanged.emit()
+
     @Slot(object)
     def _on_mpris(self, cur):
+        if self._fake is not None:
+            f = self._fake
+            pos = f["pos"] + (time.monotonic() - f["at"] if f["status"] == "Playing" else 0.0)
+            cur = dict(inst="fake", kind="fooyin", status=f["status"], pos=pos, length=f["length"],
+                       artist=f["artist"], title=f["title"], art_local="")
         if not cur:
             cur = dict(inst="", kind="", status="", pos=0.0, length=0.0, artist="", title="", art_local="")
         if cur["inst"] != self._inst:
@@ -303,13 +334,16 @@ class Backend(QObject):
     @Slot(str, int)
     def _on_art(self, path, serial):
         if serial != self._serial:                          # a newer render is on its way
-            Path(path).unlink(missing_ok=True) if path else None
+            if path:
+                Path(path).unlink(missing_ok=True)
+                Path(low_path(path)).unlink(missing_ok=True)
             return
         new, self._pending_new = self._pending_new, False
         if path:
             self._files.append(path)
             for old in self._files[:-3]:                  # the window still shows the last two
                 Path(old).unlink(missing_ok=True)
+                Path(low_path(old)).unlink(missing_ok=True)
             self._files = self._files[-3:]
         self.artReady.emit(QUrl.fromLocalFile(path).toString() if path else "", new)
 
@@ -384,6 +418,8 @@ class Backend(QObject):
             print(f"[deck] setVolume {self._volume} -> {v} (muted={self._muted})", file=sys.stderr, flush=True)
         unmute = self._muted and v > self._volume
         changed = v != self._volume
+        if changed:
+            self.volumeRipple.emit(1 if v > self._volume else -1)
         self._volume, self._vol_set_at = v, time.monotonic()
         if unmute:
             self._muted = False
@@ -401,6 +437,7 @@ class Backend(QObject):
     def toggleMute(self):
         self._muted, self._vol_set_at = not self._muted, time.monotonic()
         m = "1" if self._muted else "0"
+        self.volumeRipple.emit(-1 if self._muted else 1)
         self.volumeChanged.emit()
         self.volumeShown.emit()
         self._pool.submit(lambda: run(["wpctl", "set-mute", SINK, m]))
@@ -412,59 +449,29 @@ class Backend(QObject):
         if (v, muted) != (self._volume, self._muted):
             if DEBUG:
                 print(f"[deck] volume changed outside the deck: {self._volume} -> {v} muted={muted}", file=sys.stderr, flush=True)
+            self.volumeRipple.emit(1 if (v > self._volume or (self._muted and not muted)) else -1)
             self._volume, self._muted = v, muted
             self.volumeChanged.emit()
             self.volumeShown.emit()
 
-    # ------------------------------------------------------------ cava (raw output through a FIFO)
-    def _cava_loop(self):
-        CAVA_CONF.write_text(
-            "[general]\nframerate = 15\nbars = %d\nsleep_timer = 2\n\n[input]\nmethod = pulse\nsource = auto\n\n"
-            "[output]\nmethod = raw\nraw_target = %s\ndata_format = binary\nbit_format = 8bit\nchannels = mono\n"
-            "mono_option = average\n\n[smoothing]\nnoise_reduction = 60\n" % (NBARS, FIFO))
-        while not self._stop.is_set():
-            try:
-                if not FIFO.is_fifo():
-                    FIFO.unlink(missing_ok=True)
-                    os.mkfifo(FIFO, 0o600)
-                self._cava = subprocess.Popen(["cava", "-p", str(CAVA_CONF)], stdin=subprocess.DEVNULL,
-                                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                with open(FIFO, "rb", buffering=0) as f:  # waits here until cava opens its end
-                    buf = b""
-                    while not self._stop.is_set():
-                        chunk = f.read(4096)
-                        if not chunk:
-                            break
-                        buf += chunk
-                        if len(buf) >= NBARS:
-                            frame = buf[len(buf) - (len(buf) % NBARS) - NBARS:][:NBARS]   # newest whole frame
-                            buf = buf[len(buf) - (len(buf) % NBARS):]
-                            self._feed([b / 255.0 for b in frame])
-            except Exception as e:
-                print(f"[deck] cava: {e}", file=sys.stderr)
-            finally:
-                if self._cava and self._cava.poll() is None:
-                    self._cava.terminate()
-            self._stop.wait(3.0)                          # cava ended (audio server restart?): try again
-
-    def _feed(self, bars):
-        bass = sum(bars[:5]) / 5.0
-        self._bass_avg = self._bass_avg * 0.94 + bass * 0.06
-        hit = max(0.0, (bass - self._bass_avg * 1.08) * 3.0) + max(0.0, bass - self._bass_prev) * 2.5
-        self._bass_prev = bass
-        with self._lock:
-            self._bars = bars
-            self._beat = max(self._beat * 0.78, min(1.0, hit))
-            self._frame_at = time.monotonic()
-
+    # ------------------------------------------------------------ the music, once per drawn frame
     @Slot(result="QVariantList")
-    def levels(self):
-        """32 bars + the beat envelope; asked for by the window on each of its (at most 15) ticks a second."""
-        with self._lock:
-            if time.monotonic() - self._frame_at > 0.35:  # cava goes quiet when nothing plays
-                self._bars = [b * 0.6 for b in self._bars]
-                self._beat *= 0.6
-            return self._bars + [self._beat]
+    def frame(self):
+        """What the window needs for the frame it is about to draw:
+        [amount, bass, mids, highs, loud, kick, glow, ring, glitch, seed, bpm, sound, 32 bars, alive]."""
+        now = time.monotonic()
+        if self._reduced:
+            o = self._reader.zero
+        else:
+            o = self._reader.frame(now)
+        if MEASURE:
+            self._built_at = now
+            if o["sound"]:
+                self._stat["age"].append(o["age"])
+            if o["beats"] != self._beats_seen:
+                self._beats_seen, self._beat_due = o["beats"], o.get("beat_t", 0.0)
+        return [self._amount, o["bass"], o["mids"], o["highs"], o["loud"], o["kick"], o["glow"], o["ring"],
+                o["glitch"], o["seed"], o["bpm"], 1.0 if o["sound"] else 0.0, *o["bars"], 1.0 if o["alive"] else 0.0]
 
     # ------------------------------------------------------------ commands from deck/ctl.py (global shortcuts)
     def _sock_loop(self):
@@ -515,6 +522,12 @@ class Backend(QObject):
                 self._render(True)
         elif cmd == "grab" and self.window is not None:
             self.window.grabWindow().save(arg)            # exactly what the window shows, as a PNG
+        elif cmd == "fake" and DEBUG:                     # fake Playing|Paused|- title|artist|seconds
+            status, _, rest = arg.partition(" ")
+            title, artist, length = (rest.split("|") + ["", "", ""])[:3]
+            self._fake = None if status == "-" else dict(status=status, title=title, artist=artist,
+                                                         length=float(length or 180), pos=0.0, at=time.monotonic())
+            self._wake.set()
         elif cmd == "ev" and DEBUG and self.window is not None:
             self._inject(arg)
 
@@ -562,20 +575,45 @@ class Backend(QObject):
 
     @Slot()
     def countFrame(self):
-        self._frames = getattr(self, "_frames", 0) + 1
+        """A frame was handed to the compositor (queued here from the render thread)."""
+        now = time.monotonic()
+        st = self._stat
+        st["swaps"].append(now)
+        if self._built_at:
+            st["build"].append(now - self._built_at)
+        if self._beat_due:                                # first frame that shows a new beat: how late after it was due?
+            st["beat"].append(now - self._beat_due)
+            self._beat_due = 0.0
 
     @Slot()
     def reportFrames(self):
-        n, self._frames = getattr(self, "_frames", 0), 0
-        print(f"[deck] frames in last 5 s: {n} = {n / 5:.1f} fps", file=sys.stderr, flush=True)
+        st, now = self._stat, time.monotonic()
+        span, swaps = now - st["t0"], st["swaps"]
+        gaps = sorted((b - a) * 1000 for a, b in zip(swaps, swaps[1:]))
+        pct = lambda xs, q: round(sorted(xs)[min(len(xs) - 1, int(len(xs) * q))] * 1000, 1) if xs else None
+        out = dict(at=time.time(), seconds=round(span, 2), fps=round(len(swaps) / span, 1) if span > 0 else 0.0,
+                   frame_ms_p50=round(gaps[len(gaps) // 2], 2) if gaps else None,
+                   frame_ms_p95=round(gaps[int(len(gaps) * 0.95)], 2) if gaps else None,
+                   frame_ms_max=round(gaps[-1], 2) if gaps else None,
+                   over_25ms=sum(1 for g in gaps if g > 25.0),
+                   data_age_ms_p50=pct(st["age"], 0.5), data_age_ms_p95=pct(st["age"], 0.95),
+                   build_to_swap_ms_p50=pct(st["build"], 0.5), build_to_swap_ms_p95=pct(st["build"], 0.95),
+                   beats=len(st["beat"]), beat_due_to_swap_ms_p50=pct(st["beat"], 0.5),
+                   beat_due_to_swap_ms_p95=pct(st["beat"], 0.95), beat_due_to_swap_ms_max=pct(st["beat"], 0.999))
+        self._stat = dict(swaps=[], age=[], build=[], beat=[], t0=now)
+        try:
+            with open(STATS, "a") as f:
+                f.write(json.dumps(out) + "\n")
+        except OSError:
+            pass
+        if DEBUG:
+            print(f"[deck] {out}", file=sys.stderr, flush=True)
 
     def shutdown(self):
         self._stop.set()
         self._wake.set()
-        if self._cava and self._cava.poll() is None:
-            self._cava.terminate()
+        self._reader.close()
         SOCK.unlink(missing_ok=True)
-        FIFO.unlink(missing_ok=True)
 
 
 def main():
@@ -594,13 +632,13 @@ def main():
         backend.shutdown()
         sys.exit(1)
     backend.window = engine.rootObjects()[0]
-    if DEBUG:                                             # frames actually shown per second (the cap is 15)
+    if MEASURE:                                           # frames actually handed over, and how late after the beat
         # frameSwapped is emitted on Qt's render thread: it must only be QUEUED to a slot of an object
         # that lives in the main thread. Running Python on the render thread corrupts memory.
         backend.window.frameSwapped.connect(backend.countFrame, Qt.QueuedConnection)
         fps = QTimer()
         fps.timeout.connect(backend.reportFrames)
-        fps.start(5000)
+        fps.start(2000)
         backend._fps_timer = fps
     signal.signal(signal.SIGTERM, lambda *_: app.quit())
     signal.signal(signal.SIGINT, lambda *_: app.quit())

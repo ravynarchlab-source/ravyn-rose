@@ -7,6 +7,8 @@
 #   rice player pear|fooyin|auto   which player takes the music tile (default auto: Pear if running, else fooyin)
 #   rice layout deck|classic       centre tile: the ASCII DECK (default), or the cava + pipes terminals
 #   rice flavour NAME|random|list  switch flavour (mono, rose, neon, amber, paper); no name opens the picker
+#   rice react on|off|subtle|full  how much the deck and the lyrics bar move with the music (default full)
+#   rice react offset MS           show everything MS milliseconds later (+) or earlier (-), if it looks off
 #   rice setup      one-time: systemd slice, launchers, Meta+Alt+N (on) / Meta+Alt+O (off) (no autostart)
 #   rice button     add the "Rice" toggle button to the first Plasma panel
 #   rice uninstall  rice off + remove every rice file, shortcut and setting
@@ -195,7 +197,8 @@ restore_look() {
 launch() {  # name cmd...
   local name=$1; shift
   systemctl --user is-active --quiet "rice-$name" && return 0     # already running: never start a second copy
-  systemd-run --user --quiet --collect --slice=rice --unit="rice-$name" \
+  # RICE_DECK_STATS=1 rice on: the deck writes its frame statistics (tools/react_bench.py reads them)
+  systemd-run --user --quiet --collect --slice=rice --unit="rice-$name" ${RICE_DECK_STATS:+--setenv=RICE_DECK_STATS=1} \
     --working-directory="$HOME" -- "$@" || log "failed to start $name"
 }
 term() {  # name program args...: a terminal panel; skipped with a log line when the program is not installed
@@ -214,6 +217,21 @@ shell_panel() {  # the terminal tile: the ASCII showcase (Enter drops to a shell
 
 player_mode() { local m; m=$(cat "$RCFG/player" 2>/dev/null); case "$m" in pear|fooyin) echo "$m" ;; *) echo auto ;; esac; }
 layout_mode() { local m; m=$(cat "$RCFG/layout" 2>/dev/null); case "$m" in classic) echo classic ;; *) echo deck ;; esac; }
+react_mode() { local m; m=$(cat "$RCFG/react" 2>/dev/null); case "$m" in off|subtle|full) echo "$m" ;; *) echo full ;; esac; }
+reduced_motion() {  # Plasma's animation speed set to "instant" (or RICE_REDUCED_MOTION=1): nothing reacts
+  [ -n "${RICE_REDUCED_MOTION:-}" ] && { [ "$RICE_REDUCED_MOTION" != 0 ]; return; }
+  [ "$(kreadconfig6 --file kdeglobals --group KDE --key AnimationDurationFactor 2>/dev/null)" = 0 ]
+}
+react_wanted() {  # the analyser feeds the deck's spectrum strip and every reaction; without either it is not started
+  reduced_motion && return 1
+  [ "$(layout_mode)" = deck ] || [ "$(react_mode)" != off ]
+}
+start_react() {  # one analyser for all panels (react/analyser.py): bass, beats, tempo, spectrum
+  if ! react_wanted; then systemctl --user stop rice-react 2>/dev/null; return 0; fi
+  have pw-record || { log "no react: pw-record is not installed (package pipewire)"; return 0; }
+  python3 -c 'import numpy' 2>/dev/null || { log "no react: python-numpy is not installed"; return 0; }
+  launch react /usr/bin/python3 "$R/react/analyser.py"
+}
 # Pear Desktop (package pear-desktop-bin) installs to /opt/YouTube Music and is started as /usr/bin/youtube-music
 pear_running() { pgrep -f '^/opt/YouTube Music/youtube-music' >/dev/null; }
 fooyin_running() { pgrep -x fooyin >/dev/null; }
@@ -264,15 +282,14 @@ start_panels() {  # panels that are already running are left alone
   mkdir -p "$RCACHE"
   [ -n "${FL_NAME:-}" ] || flavour_build
   shell_panel                                             # first, so the showcase is up before the heavier panels load
+  start_react                                             # before the panels that read it
   launch lyricsd /usr/bin/python3 "$R/lyrics.py"
-  systemctl --user is-active --quiet rice-lyrics || \
-  systemd-run --user --quiet --collect --slice=rice --unit=rice-lyrics -E QML_XHR_ALLOW_FILE_READ=1 \
-    --working-directory="$HOME" -- /usr/bin/qml6 "$R/lyrics.qml" -- "$FL/theme.json" "$RCACHE/now.json" || log "failed to start lyrics window"
+  launch lyrics /usr/bin/python3 "$R/lyricswin.py" "$FL/theme.json" "$RCACHE/now.json"
   ensure_player
   if [ "$(layout_mode)" = classic ]; then                 # two terminals in the centre: spectrum and pipes
     term cava  cava -p "$FL/cava.conf"
     term pipes pipes.sh "${FL_PIPES[@]}"
-  else                                                    # ASCII DECK: art, controls, spectrum (runs its own cava)
+  else                                                    # ASCII DECK: art, controls, spectrum
     { [ -f "$R/deck/ascii.frag.qsb" ] && [ -f "$R/deck/spectrum.frag.qsb" ]; } || compile_shaders
     launch deck /usr/bin/python3 "$R/deck/deck.py" "$FL/theme.json"
   fi
@@ -327,8 +344,32 @@ rice_layout() {
   fi
 }
 
+rice_react() {
+  local m
+  mkdir -p "$RCFG"
+  case "${1:-}" in
+    off|subtle|full) echo "$1" > "$RCFG/react"; [ "$1" = off ] || echo "$1" > "$RCFG/react-last"; log "react: $1" ;;
+    on) m=$(cat "$RCFG/react-last" 2>/dev/null); case "$m" in subtle|full) ;; *) m=full ;; esac
+        echo "$m" > "$RCFG/react"; log "react: $m" ;;
+    offset)
+      case "${2:-}" in
+        ""|show) echo "react offset: $(cat "$RCFG/react-offset" 2>/dev/null || echo 0) ms"; return ;;
+        -[0-9]*|+[0-9]*|[0-9]*) m=${2#+}
+          { [ "$m" -ge -500 ] && [ "$m" -le 500 ]; } 2>/dev/null || { echo "offset: a whole number of milliseconds between -500 and 500"; exit 2; }
+          echo "$m" > "$RCFG/react-offset"; log "react offset: $m ms (the analyser picks it up within 5 s)"; return ;;
+        *) echo "usage: rice react offset MS   (for example 40 or -40)"; exit 2 ;;
+      esac ;;
+    ""|show)
+      echo "react: $(react_mode)   offset: $(cat "$RCFG/react-offset" 2>/dev/null || echo 0) ms"
+      reduced_motion && echo "  reduced motion is on (Plasma animation speed: instant): nothing reacts until that is changed"
+      return ;;
+    *) echo "usage: rice react on|off|subtle|full|show|offset MS"; exit 2 ;;
+  esac
+  reduced_motion && echo "note: reduced motion is on (Plasma animation speed: instant), so nothing reacts until that is changed"
+  if is_on; then start_react; fi                          # the panels read the new level within a second
+}
 rice_flavour() {
-  local want=${1:-} out="$ST/pick"
+  local want=${1:-} out="$ST/pick" picked="" level
   case "$want" in
     list) python3 "$R/flavour.py" list; return ;;
     show) echo "flavour: $(flavour_name)"; return ;;
@@ -337,12 +378,15 @@ rice_flavour() {
       rm -f "$out"; flock -u 9
       if [ -t 0 ] && [ -t 1 ]; then python3 "$R/flavour.py" pick "$out"
       elif have alacritty; then
-        alacritty --class rice-picker --title "rice flavour" -o window.dimensions.columns=78 -o window.dimensions.lines=9 \
+        alacritty --class rice-picker --title "rice flavour" -o window.dimensions.columns=78 -o window.dimensions.lines=11 \
           -e python3 "$R/flavour.py" pick "$out"
       else echo "no terminal for the picker: use rice flavour NAME (rice flavour list)"; exit 1; fi
       flock -w 30 9 || exit 1
-      want=$(cat "$out" 2>/dev/null); rm -f "$out"
-      [ -n "$want" ] || { echo "flavour unchanged: $(flavour_name)"; return; } ;;
+      picked=$(cat "$out" 2>/dev/null); rm -f "$out"   # "flavour<TAB>react level"; empty = cancelled
+      want=${picked%%$'\t'*}; level=${picked#*$'\t'}
+      [ -n "$want" ] || { echo "flavour unchanged: $(flavour_name)"; return; }
+      if [ "$level" != "$picked" ] && [ "$level" != "$(react_mode)" ]; then rice_react "$level"; fi
+      [ "$want" != "$(flavour_name)" ] || { echo "flavour unchanged: $want   react: $(react_mode)"; return; } ;;
   esac
   case " $(python3 "$R/flavour.py" names) " in
     *" $want "*) ;;
@@ -360,7 +404,7 @@ rice_flavour() {
 
 rice_status() {
   if is_on; then echo "rice: ON"; else echo "rice: off"; fi
-  echo "  flavour: $(flavour_name)   layout: $(layout_mode)   music tile: $(player_mode)   pear: $(pear_running && echo running || echo -)   fooyin: $(fooyin_running && echo running || echo -)"
+  echo "  flavour: $(flavour_name)   layout: $(layout_mode)   react: $(react_mode)$(reduced_motion && echo ' (reduced motion: nothing reacts)')   music tile: $(player_mode)   pear: $(pear_running && echo running || echo -)   fooyin: $(fooyin_running && echo running || echo -)"
   systemctl --user list-units --plain --no-legend 'rice-*' 2>/dev/null | awk '{print "  " $1, $3, $4}'
   local mem cpu
   mem=$(systemctl --user show rice.slice -p MemoryCurrent --value 2>/dev/null)
@@ -536,6 +580,7 @@ case "${1:-status}" in
   player) rice_player "${2:-}" ;;
   layout) rice_layout "${2:-}" ;;
   flavour|flavor) rice_flavour "${2:-}" ;;
+  react) rice_react "${2:-}" "${3:-}" ;;
   toggle) if is_on; then log "toggle: rice is on -> off"; rice_off; else log "toggle: rice is off -> on"; rice_on; fi ;;
   status) rice_status ;;
   setup) rice_setup ;;
@@ -543,5 +588,5 @@ case "${1:-status}" in
   button-remove) button_remove ;;            # internal: remove only the panel button
   deck-setup) only_installed deck-setup; deck_setup ;;   # internal: compile shaders + global shortcuts only
   uninstall) rice_uninstall ;;
-  *) echo "usage: rice on|off|toggle|status|flavour NAME|random|list|player pear|fooyin|auto|layout deck|classic|setup|button|uninstall"; exit 2 ;;
+  *) echo "usage: rice on|off|toggle|status|flavour NAME|random|list|react on|off|subtle|full|player pear|fooyin|auto|layout deck|classic|setup|button|uninstall"; exit 2 ;;
 esac

@@ -29,14 +29,20 @@ every Arch install.
 | `pyside6` | the deck window and its backend | repositories |
 | `python-pillow` | crops and sharpens the cover art, builds the glyph atlas | repositories |
 | `qt6-shadertools` | `qsb`, which compiles the two shaders on your machine | repositories |
-| `cava` | spectrum data (raw mode) and the classic visualizer | repositories |
+| `python-numpy` | the analyser behind the reactive deck and the spectrum strip (`react/analyser.py`) | repositories |
+| `pipewire` | `pw-record` and `pw-dump`: what the analyser listens through, and the output's delay | repositories |
 | `wireplumber` | `wpctl`, for volume and mute | repositories |
+
+`stdbuf` (coreutils) is used too, so the audio reaches the analyser chunk by chunk. Without
+`python-numpy` or `pw-record` the deck still works; it just does not react and its spectrum
+strip stays empty.
 
 ## Panels
 
 | Package | Panel | Found in |
 |---|---|---|
 | `cmatrix` | matrix | repositories |
+| `cava` | spectrum terminal of the classic layout | repositories |
 | `fastfetch` | system facts in the terminal showcase | repositories |
 | `chafa` | album art in the terminal showcase (without it a plainer built-in drawing is used) | repositories |
 | `fish` | the shell behind the showcase (falls back to your login shell) | repositories |

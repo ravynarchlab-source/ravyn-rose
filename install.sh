@@ -46,8 +46,8 @@ FONT_SHA256="e623b72f1021062ad0156cc41f54b108e70bd35e2b295127475bb572d8ade61d"
 # What each group is for is written up in DEPENDENCIES.md.
 PKG_CORE=(alacritty qt6-declarative qt6-tools playerctl python libnotify rsync fontconfig curl unzip
           ttf-cascadia-code-nerd noto-fonts)
-PKG_DECK=(pyside6 python-pillow qt6-shadertools cava wireplumber)
-PKG_PANELS=(cmatrix fish fastfetch chafa fooyin)
+PKG_DECK=(pyside6 python-pillow qt6-shadertools python-numpy pipewire wireplumber)
+PKG_PANELS=(cmatrix cava fish fastfetch chafa fooyin)
 PKG_EXTRA=(lavat pipes.sh)          # AUR on Arch; the rice simply skips a panel whose program is missing
 
 step() { printf '\n== %s\n' "$*"; }

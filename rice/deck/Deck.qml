@@ -1,8 +1,10 @@
 // Rice ASCII DECK window (loaded by deck.py, which provides `backend`).
 // Qt Quick, not a terminal, for two reasons: Qt shapes Arabic and lays it out right-to-left (terminals
 // cannot), and the character grid is drawn by a GPU shader at exact pixel positions.
-// Everything that moves is advanced by ONE timer (`tick`), so the window never repaints more than
-// 15 times a second, and 4 times a second when nothing plays.
+// Everything that moves is advanced by ONE function (`step`). While music plays and `rice react` is
+// not off, it runs once per display frame (60 fps on a 60 Hz screen) and takes bass, beats and the
+// spectrum from the shared analyser. Otherwise it runs 15 times a second, and when nothing plays and
+// the picture has gone still it changes nothing at all, so the window is not repainted.
 import QtQuick
 import QtQuick.Window
 
@@ -39,8 +41,24 @@ Window {
     property real time: 0
     property real frame: 0
     property real progress: 1                // track-change animation, 1 = settled
-    property real beat: 0
-    property var bars: []
+    // from the shared analyser, fresh every frame: [amount, bass, mids, highs, loud, kick, glow, ring,
+    // glitch, seed, bpm, sound, 32 bars, alive] (deck.py frame())
+    property var rx: [0, 0, 0, 0, 0, 0, 0, -1, 0, 0, 0, 0]
+    property bool hearing: false             // the analyser is delivering: what is audible decides, not the player's word
+    readonly property bool reduced: backend.reducedMotion
+    readonly property bool reactOn: backend.amount > 0 && !reduced
+    property real quiet: 0                   // seconds without sound
+    // With the analyser running, silence puts the art to sleep and sound wakes it at once (a player
+    // reports "Paused" or "Playing" up to a second late). Without it, the player's state decides.
+    readonly property bool asleep: (reactOn && hearing) ? quiet > 0.7 : !playing
+    property real still: asleep ? 1 : 0      // 0 alive .. 1 the art has faded to a static dither
+    property real wake: 0                    // one pulse when the music comes back (used when react is off)
+    property real volT: 1                    // 0..1 while the ripple of a volume change crosses the deck
+    property real volDir: 1
+    readonly property real volRip: volT >= 1 ? -1 : (function () {
+        var e = 0.5 - 0.5 * Math.cos(Math.PI * volT)                   // ease in and out
+        return volDir > 0 ? -0.2 + 1.4 * e : 1.2 - 1.4 * e })()
+    readonly property int bpm: Math.round(rx[10])
     property real pos: 0                     // playback position, interpolated between polls
     property bool hasNew: false
     property bool hasOld: false
@@ -50,7 +68,10 @@ Window {
     property string bannerTitle: ""
     property string bannerArtist: ""
     property string hintText: ""
-    readonly property bool busy: playing || progress < 1 || osdLeft > 0 || bannerLeft > 0 || hintLeft > 0
+    readonly property bool animating: progress < 1 || volT < 1 || wake > 0 || (still > 0 && still < 1)
+    readonly property bool busy: playing || animating || osdLeft > 0 || bannerLeft > 0 || hintLeft > 0
+    // every display frame: only when something has to move smoothly
+    readonly property bool fast: visible && !reduced && (animating || (reactOn && !asleep) || (reactOn && still < 1))
 
     function isArabic(s) { return /[؀-ۿݐ-ݿࢠ-ࣿﭐ-﷿ﹰ-﻿]/.test(s) }
     function fam(s) { return isArabic(s) ? "Noto Kufi Arabic" : win.uiFont }
@@ -63,41 +84,66 @@ Window {
     function showBanner(t, a) { bannerTitle = t; bannerArtist = a; bannerLeft = 4.0 }
     function showHint(t) { hintText = t; hintLeft = 1.4 }
 
-    Timer {
+    function step(dt) {
+        // nothing plays and the fade is over, or the desktop asks for no motion: hold the picture
+        var frozen = win.reduced || (win.still >= 1 && !win.animating)
+        if (!frozen) {
+            win.time = (win.time + dt) % 3600
+            win.frame = Math.floor(win.time * 15) % 4096
+        }
+        if (win.progress < 1) win.progress = win.reduced ? 1 : Math.min(1, win.progress + dt / 0.8)
+        if (win.osdLeft > 0) win.osdLeft = Math.max(0, win.osdLeft - dt)
+        if (win.bannerLeft > 0) win.bannerLeft = Math.max(0, win.bannerLeft - dt)
+        if (win.hintLeft > 0) win.hintLeft = Math.max(0, win.hintLeft - dt)
+        if (win.playing) win.pos = Math.min(backend.length > 0 ? backend.length : 1e9, win.pos + dt)
+        if (win.volT < 1) win.volT = Math.min(1, win.volT + dt / 0.6)
+        if (win.wake > 0) win.wake = Math.max(0, win.wake - dt / 0.35)
+        var r = backend.frame()
+        win.hearing = r[44] > 0.5
+        win.quiet = r[11] > 0.5 ? 0 : win.quiet + dt
+        // the fade to the still picture takes 1.6 s; coming back takes a tenth of a second
+        var goal = win.asleep ? 1 : 0
+        if (win.reduced) win.still = goal
+        else if (win.still < goal) win.still = Math.min(1, win.still + dt / 1.6)
+        else if (win.still > goal) win.still = Math.max(0, win.still - dt / 0.10)
+        if (!frozen || r[11] > 0.5) win.rx = r
+    }
+    FrameAnimation {                                        // once per display frame
+        running: win.fast
+        onTriggered: win.step(Math.min(0.1, frameTime))
+    }
+    Timer {                                                 // the slow clock for everything else
         id: tick
-        interval: win.busy ? 66 : 250
-        running: win.visible
+        interval: win.busy || win.reactOn ? 66 : 250
+        running: win.visible && !win.fast
         repeat: true
         property real last: 0
+        onRunningChanged: last = 0
         onTriggered: {
             var now = Date.now()
             var dt = last > 0 ? Math.min(0.5, (now - last) / 1000) : 0.066
             last = now
-            win.time = (win.time + dt) % 3600
-            win.frame = (win.frame + 1) % 4096
-            if (win.progress < 1) win.progress = Math.min(1, win.progress + dt / 1.9)
-            if (win.osdLeft > 0) win.osdLeft = Math.max(0, win.osdLeft - dt)
-            if (win.bannerLeft > 0) win.bannerLeft = Math.max(0, win.bannerLeft - dt)
-            if (win.hintLeft > 0) win.hintLeft = Math.max(0, win.hintLeft - dt)
-            if (win.playing) win.pos = Math.min(backend.length > 0 ? backend.length : 1e9, win.pos + dt)
-            var lv = backend.levels()
-            win.beat = lv[32]
-            win.bars = lv
+            win.step(dt)
         }
     }
+    onPlayingChanged: if (playing && !reactOn && !reduced) wake = 1      // back alive: one pulse
 
     Connections {
         target: backend
         function onStateChanged() { win.pos = backend.position }
         function onArtReady(url, isNew) {
-            if (isNew) {                     // new track: the old art rains away, the new one decodes
+            var lowUrl = url.replace(/\.png$/, "-low.png")
+            if (isNew) {                     // new track: the old art falls apart, the new one is written line by line
                 imgOld.source = imgNew.source
+                lowOld.source = lowNew.source
                 win.hasOld = win.hasNew
                 imgNew.source = url
+                lowNew.source = lowUrl
                 win.hasNew = url !== ""
                 win.progress = 0
             } else {                         // same track, new size / zoom / fit: just swap
                 imgNew.source = url
+                lowNew.source = lowUrl
                 win.hasNew = url !== ""
                 win.hasOld = false
                 win.progress = 1
@@ -106,6 +152,11 @@ Window {
         function onTrackChanged() { win.showBanner(backend.title, backend.artist) }
         function onBannerShown(t, a) { win.showBanner(t, a) }
         function onVolumeShown() { win.osdLeft = 1.9 }           // 1.5 s, then a 0.4 s fade
+        function onVolumeRipple(dir) {                           // a wave crosses the deck, the way the volume went
+            if (win.reduced || (win.volT < 0.5 && dir === win.volDir)) return     // one is on its way already
+            win.volDir = dir
+            win.volT = 0
+        }
         function onSettingsChanged() { win.showHint(backend.modeName + (backend.zoom === 2 ? " · big" : "") + (backend.fill ? "" : " · fit")) }
     }
     Component.onCompleted: { win.pos = backend.position; gridTimer.restart() }
@@ -176,6 +227,9 @@ Window {
             Image { id: imgNew; visible: false; smooth: false; mipmap: false; cache: false; asynchronous: false }
             Image { id: imgOld; visible: false; smooth: false; mipmap: false; cache: false; asynchronous: false }
             Image { id: atlasImg; visible: false; smooth: false; mipmap: false; cache: false; asynchronous: false; source: backend.atlasUrl }
+            // one texel per cell; smooth, so reading between cells gives a blur
+            Image { id: lowNew; visible: false; smooth: true; mipmap: false; cache: false; asynchronous: false }
+            Image { id: lowOld; visible: false; smooth: true; mipmap: false; cache: false; asynchronous: false }
 
             ShaderEffect {
                 id: fx
@@ -186,16 +240,30 @@ Window {
                 property variant artNew: imgNew
                 property variant artOld: imgOld
                 property variant atlas: atlasImg
+                property variant lowNew: lowNew
+                property variant lowOld: lowOld
                 property vector2d grid: Qt.vector2d(win.cols, win.rows)
                 property real nGlyphs: backend.nGlyphs
                 property real mode: backend.mode
                 property real time: win.time
                 property real frame: win.frame
                 property real progress: win.progress
-                property real beat: win.beat
+                property real fx: backend.fx
+                // a wake pulse still shows when react is off, at the "subtle" strength
+                property real amt: win.reduced ? 0 : Math.max(win.rx[0], win.wake > 0 ? 0.45 : 0)
+                property real bass: win.rx[1]
+                property real loud: win.rx[4]
+                property real kick: Math.max(win.rx[5], win.wake)
+                property real glow: Math.max(win.rx[6], win.wake)
+                property real ring: win.rx[7]
+                property real glitch: win.rx[8]
+                property real seed: win.rx[9]
+                property real volRip: win.volRip
+                property real volDir: win.volDir
+                property real still: win.still * win.still * (3 - 2 * win.still)       // eased
                 property real hasNew: win.hasNew ? 1 : 0
                 property real hasOld: win.hasOld ? 1 : 0
-                property real shimmer: 1
+                property real shimmer: win.reduced ? 0 : 1
                 property color c0: theme.shader[0]
                 property color c1: theme.shader[1]
                 property color c2: theme.shader[2]
@@ -335,14 +403,25 @@ Window {
             anchors { left: parent.left; right: parent.right; bottom: parent.bottom }
             spacing: 2
 
-            Text {                               // now playing (always there; the banner is the loud version)
-                width: parent.width
-                text: backend.title ? (backend.artist ? backend.title + "  —  " + backend.artist : backend.title)
-                                    : (backend.player ? "♪ " + backend.player + " ready" : "♪ no music player running")
-                font.family: win.fam(text); font.pixelSize: 13
-                color: win.playing ? win.cBlush : win.cDim
-                horizontalAlignment: Text.AlignHCenter
-                textFormat: Text.PlainText; elide: Text.ElideRight; maximumLineCount: 1
+            Item {                               // now playing (always there; the banner is the loud version)
+                width: parent.width; height: nowText.implicitHeight
+                Text {
+                    id: nowText
+                    width: parent.width
+                    text: backend.title ? (backend.artist ? backend.title + "  —  " + backend.artist : backend.title)
+                                        : (backend.player ? "♪ " + backend.player + " ready" : "♪ no music player running")
+                    font.family: win.fam(text); font.pixelSize: 13
+                    color: win.playing ? win.cBlush : win.cDim
+                    horizontalAlignment: Text.AlignHCenter
+                    textFormat: Text.PlainText; elide: Text.ElideRight; maximumLineCount: 1
+                }
+                Text {                           // the tempo the analyser found
+                    visible: win.bpm > 0 && win.reactOn && !win.asleep
+                    anchors { right: parent.right; verticalCenter: parent.verticalCenter }
+                    text: win.bpm + " bpm"
+                    font.family: win.uiFont; font.pixelSize: 11
+                    color: win.cDim
+                }
             }
 
             Item {
@@ -401,8 +480,8 @@ Window {
             ShaderEffect {                       // spectrum strip (what the cava terminal used to show)
                 width: parent.width
                 height: Math.max(40, Math.min(84, win.height * 0.10))
-                readonly property var v: win.bars
-                function q(i) { return v.length > i + 3 ? Qt.vector4d(v[i], v[i + 1], v[i + 2], v[i + 3]) : Qt.vector4d(0, 0, 0, 0) }
+                readonly property var v: win.rx
+                function q(i) { i += 12; return v.length > i + 3 ? Qt.vector4d(v[i], v[i + 1], v[i + 2], v[i + 3]) : Qt.vector4d(0, 0, 0, 0) }
                 property vector4d b0: q(0)
                 property vector4d b1: q(4)
                 property vector4d b2: q(8)
@@ -412,7 +491,9 @@ Window {
                 property vector4d b6: q(24)
                 property vector4d b7: q(28)
                 property vector2d cells: Qt.vector2d(32, 7)
-                property real beat: win.beat
+                property real beat: win.rx[5] * win.rx[0]
+                property real volRip: win.volRip
+                property real fade: 1 - 0.75 * win.still
                 property color c1: theme.shader[1]
                 property color c2: theme.shader[2]
                 property color c3: theme.shader[3]

@@ -194,14 +194,21 @@ def pick(outfile):
     fl = [load(n) for n in ns]
     i = ns.index(current())
     block = lambda h: "\x1b[48;2;%d;%d;%dm   \x1b[0m" % rgb(h)
+    levels = ["off", "subtle", "full"]                    # how much the deck moves with the music (rice react)
+    try:
+        r = levels.index((CFG / "react").read_text().strip())
+    except (OSError, ValueError):
+        r = 2
 
     def draw():
-        rows = ["\x1b[H\x1b[2J  rice flavour   (arrows or 1-%d, enter = apply, q = cancel)\r\n" % len(ns)]
+        rows = ["\x1b[H\x1b[2J  rice flavour   (arrows or 1-%d, r = react, enter = apply, q = cancel)\r\n" % len(ns)]
         for k, f in enumerate(fl):
             c = f["colors"]
             sw = "".join(block(c[x]) for x in ("bg", "deep", "accent", "accent2", "fg"))
             mark = "\x1b[1m>\x1b[0m" if k == i else " "
             rows.append("  %s %d  %s  \x1b[1m%-6s\x1b[0m %s\r\n" % (mark, k + 1, sw, f["title"], f["blurb"]))
+        rows.append("\r\n    react to the music:  " + "  ".join(
+            ("\x1b[1;7m %s \x1b[0m" if k == r else " %s ") % name for k, name in enumerate(levels)) + "\r\n")
         sys.stdout.write("".join(rows))
         sys.stdout.flush()
 
@@ -223,13 +230,17 @@ def pick(outfile):
                 i = (i - 1) % len(ns)
             elif ch in (b"\x1b[B", b"j", b"\t"):
                 i = (i + 1) % len(ns)
+            elif ch in (b"r", b"R", b"\x1b[C"):
+                r = (r + 1) % len(levels)
+            elif ch == b"\x1b[D":
+                r = (r - 1) % len(levels)
             elif ch.isdigit() and 1 <= int(ch) <= len(ns):
                 i = int(ch) - 1
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
         sys.stdout.write("\x1b[?25h\x1b[H\x1b[2J")
         sys.stdout.flush()
-    Path(outfile).write_text(choice or "")
+    Path(outfile).write_text("%s\t%s" % (choice, levels[r]) if choice else "")
 
 
 def main(a):

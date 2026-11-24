@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Rice lyrics backend: follows the music player that is actually playing and writes the current
-lyric line to ~/.cache/rice/now.json, which the Qt Quick window (lyrics.qml) displays.
+lyric line to ~/.cache/rice/now.json, which the lyrics window (lyricswin.py + lyrics.qml) displays.
+With the line go its start time, the next line's start time and the playback position, so the
+window can light up the word being sung.
 
 Players: only music players are followed (Pear Desktop first, then fooyin). Browsers are ignored.
 Lyrics:  1) the .lrc next to the playing file (same name)  2) LRCLIB (lrclib.net, public API, no key),
@@ -44,12 +46,16 @@ def poll():
                         url=f[4], artist=f[5], title=f[6], album=f[7], art=f[8]))
     return out
 
-def choose(players):
+def choose(players, following=""):
+    """The player to show: one that is playing; else the one followed so far if it is only paused
+    (pausing fooyin must not make the panels jump to a paused Pear, whose buttons would then start
+    Pear); else Pear before fooyin."""
     prio = {"pear": 0, "fooyin": 1}
     for wanted in ("Playing", "Paused"):
         c = [p for p in players if p["status"] == wanted]
         if c:
-            return sorted(c, key=lambda p: prio[p["kind"]])[0]
+            same = [p for p in c if p["inst"] == following]
+            return same[0] if same else sorted(c, key=lambda p: prio[p["kind"]])[0]
     return sorted(players, key=lambda p: prio[p["kind"]])[0] if players else None
 
 # ---------------- lyrics ----------------
@@ -152,16 +158,18 @@ class Lyrics:
                     self.retry_at = time.time() + 60
 
     def line_at(self, pos):
+        """(text, state, start of this line, start of the next line) at a playback position."""
         with self.lock:
             lines, state = self.lines, self.state
         if state != "ok" or not lines:
-            return None, state
-        cur = ""
+            return None, state, -1.0, -1.0
+        cur, t0, t1 = "", -1.0, -1.0
         for t, s in lines:
             if t > pos:
+                t1 = t
                 break
-            cur = s
-        return cur, state
+            cur, t0 = s, t
+        return cur, state, t0, t1
 
 # ---------------- album art ----------------
 _art = {}
@@ -196,13 +204,15 @@ def write(state):
     tmp.replace(NOW)
 
 def main():
-    lyr, cur, base_t, last_poll, shown, seq = Lyrics(), None, 0.0, 0.0, None, 0
+    lyr, cur, base_t, last_poll, shown, seq, clock = Lyrics(), None, 0.0, 0.0, None, 0, (0.0, 0.0)
     while True:
         now = time.monotonic()
         if now - last_poll >= 1.0:
-            cur = choose(poll()); base_t = now; last_poll = now
+            cur = choose(poll(), cur["inst"] if cur else ""); base_t = now; last_poll = now
             if cur and cur["status"] in ("Playing", "Paused"):
                 lyr.want(cur)
+        t0 = t1 = -1.0
+        pos = 0.0
         if not cur:
             st = dict(line="♪ no music player running", status="none", sub="", art="", player="")
         else:
@@ -211,13 +221,20 @@ def main():
             if cur["status"] not in ("Playing", "Paused"):
                 line = f"♪ {cur['kind']} ready · nothing playing"
             else:
-                text, state = lyr.line_at(pos)
+                text, state, t0, t1 = lyr.line_at(pos)
+                if not text:
+                    t0 = t1 = -1.0                      # an instrumental gap: nothing to follow word by word
                 line = {"ok": text or "♪", "searching": "♪ looking for synced lyrics…",
                         "none": "♪ no synced lyrics", "error": "♪ lyrics offline — retrying"}.get(state, "♪")
             st = dict(line=line, status=cur["status"], sub=sub, art=art_file(cur["art"]), player=cur["kind"])
         st["rtl"] = bool(ARABIC.search(st["line"]))
-        if st != shown:
-            seq += 1; shown = dict(st); write(dict(st, seq=seq))
+        st["t0"], st["t1"] = t0, t1
+        # the position is written with the monotonic time it was true at; the window counts on from there.
+        # A seek or a player that drifts moves it by more than the tolerance below, and it is written again.
+        drift = abs(pos - (clock[0] + (now - clock[1] if st["status"] == "Playing" else 0.0)))
+        if st != shown or (t0 >= 0 and drift > 0.25):
+            seq += 1; shown = dict(st); clock = (pos, now)
+            write(dict(st, seq=seq, pos=pos, at=now))
         time.sleep(0.15)
 
 if __name__ == "__main__":

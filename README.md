@@ -84,13 +84,14 @@ wallpapers are drawn.
 - **The toggle.** One script, `rice`, with a panel button and two shortcuts. Your `kdeglobals`,
   GTK colours, window rules and wallpaper are saved when it turns on and restored byte for byte
   when it turns off. Changing flavour keeps that saved copy.
-- **Lyrics bar.** Follows whichever music player is actually playing and shows the current line.
+- **Lyrics bar.** Follows whichever music player is actually playing and shows the current line,
+  word by word, with the word being sung flashing on the beat.
   It reads a `.lrc` file next to the track first, then asks [LRCLIB](https://lrclib.net).
   Arabic lines are shaped and laid out right to left.
 - **ASCII deck.** Cover art redrawn as characters by a GPU shader, in four modes: character
-  ramp, half blocks, braille dots, and a tint in the flavour's colours. When the track changes
-  the old picture falls away as rain and the new one decodes in. Play, pause, skip, seek,
-  volume and a spectrum strip are built in, for mouse, keyboard and touch.
+  ramp, half blocks, braille dots, and a tint in the flavour's colours. It moves with the
+  music, differently in every flavour: see [Reactive deck](#reactive-deck). Play, pause, skip,
+  seek, volume and a spectrum strip are built in, for mouse, keyboard and touch.
 - **Terminal showcase.** The terminal tile opens on fastfetch with a RAVYN logo lettered
   differently for each flavour, a block clock, and a part that rotates between the playing
   track's cover (drawn by chafa) and six small ASCII scenes that move a little. It never prints
@@ -111,6 +112,110 @@ wallpapers are drawn.
 Classic layout, here in NEON:
 
 ![classic layout: cava and pipes in the centre](assets/classic.png)
+
+## Reactive deck
+
+![the five flavours reacting to the same drop](assets/react.gif)
+
+The deck and the lyrics bar move with the music. One small analyser listens to what the default
+output plays (the sink's monitor through PipeWire, never a microphone) and works out bass, mids,
+highs, loudness, beat onsets, tempo and the 32 spectrum bars. Every panel reads the same numbers
+from the same clock, so the art, the spectrum strip and the lyric highlight pulse together.
+Everything has an attack and a release; nothing flickers.
+
+| Flavour | How the art reacts |
+|---|---|
+| MONO | A halftone dot swells under each character with the bass and shrinks back. A strong beat sends one clean ring of inverted cells out from the centre. |
+| ROSE | A soft bloom breathes with the loudness. On a beat some characters are blown outward a little and settle back. |
+| NEON | Edges light up cyan on one side and magenta on the other with the bass. A strong beat splits red and blue apart and slips a few bands of rows sideways for a moment. |
+| AMBER | The phosphor flares sideways on a kick and leaves an afterglow that trails downward. The whole tube bulges slightly on every kick. |
+| PAPER | The ink dots spread and run into each other with the bass, then dry back a shade lighter. |
+
+Other moments:
+
+- **Track change.** The old cover comes apart and its characters fall; the new one is written
+  line by line from the top. 0.8 s.
+- **Pause.** The art holds still and fades to a static one-bit dither. When the sound comes
+  back it is alive again within a frame or two, with one pulse.
+- **Volume.** A wave crosses the art and the spectrum, rightward for louder, leftward for quieter.
+- **Lyrics bar.** With synced lyrics the line is shown word by word; the word being sung is the
+  bright one and it flashes on the beat. The next line slides in from below. `.lrc` files carry
+  one time per line, so the position inside a line is an estimate shared out by word length.
+- **Tempo.** The BPM the analyser found is shown small next to the track title.
+
+```
+rice react full      # the default
+rice react subtle    # the same reactions at under half the strength
+rice react off       # nothing reacts; the spectrum strip keeps working
+rice react on        # back to the level used last
+rice react offset 40 # show everything 40 ms later (negative: earlier), if it looks off to you
+```
+
+The flavour picker has the same switch (`r`). If Plasma's animation speed is set to "instant",
+nothing reacts and the transitions become plain swaps.
+
+**Staying with the sound.** Sound reaches your ears later than it enters the audio graph: a few
+tens of milliseconds on speakers, 0.1 to 0.3 s on Bluetooth. The analyser reads the delay
+PipeWire reports for the output in use and stamps every value with the moment it should be
+shown, so the picture follows what you hear and does not run ahead of it. For Bluetooth that
+figure is the codec's estimate, not a measurement; `rice react offset` is there for that.
+
+### Measured
+
+On the test laptop (i5-8365U, UHD 620, 1920 x 1080 at 60 Hz, power-save governor), 12 s per
+flavour while the demo track played, with `tools/react_bench.py`:
+
+| Flavour | Deck frames per second | Frames later than 25 ms | Beat due to frame handed over: median / slowest | CPU, all four processes | GPU, deck |
+|---|---|---|---|---|---|
+| MONO | 59.9 | 1 of 718 | 14 ms / 27 ms | 41 % of one core | 26 % |
+| ROSE | 59.9 | 1 of 718 | 13 ms / 28 ms | 50 % | 30 % |
+| NEON | 59.9 | 1 of 718 | 16 ms / 30 ms | 49 % | 37 % |
+| AMBER | 59.8 | 2 of 718 | 17 ms / 39 ms | 47 % | 32 % |
+| PAPER | 59.8 | 6 of 718 | 16 ms / 41 ms | 49 % | 23 % |
+
+- **Lag.** "Beat due" is the moment a beat should be on screen; the figure is how long after
+  it the first frame showing it was handed to the compositor. The compositor then needs up to
+  one refresh (16.7 ms) more, which this cannot see. On speakers the output itself plays about
+  21 ms late (PipeWire's figure), so against what you hear the picture is typically 5 to 15 ms
+  behind, and on the slowest frames about 40 ms. The detector itself fires a median of 5 ms
+  after a kick starts (`react/analyser.py --selftest`).
+- **CPU.** Analyser 10 to 12 %, deck 17 to 21 %, lyrics window 12 to 14 %, lyrics backend 2 to
+  3 %, each as a share of one core. That is 5 to 6 % of this 8-thread CPU, and it is counted
+  while the cores idle at their lowest clock; run flat out, the analyser's own work is 1.1 % of
+  a core. Any Qt Quick window that repaints 60 times a second costs about 6 % here before it
+  draws anything. Before this change the deck drew 15 frames a second and used about 8 %.
+  With `rice react off`, or while nothing plays, the deck goes back to that or to nothing.
+- **GPU** is the share of time the graphics chip's render engine worked for the deck's process.
+- **Memory.** Analyser 33 MB, deck 193 MB, lyrics window 165 MB.
+
+### Videos
+
+30 s each, with sound: the build, the drop at 0:08, a volume change at 0:15, pause at 0:19 and
+play at 0:21, the next track at 0:25.
+
+[MONO](assets/react/react-mono.mp4) · [ROSE](assets/react/react-rose.mp4) ·
+[NEON](assets/react/react-neon.mp4) · [AMBER](assets/react/react-amber.mp4) ·
+[PAPER](assets/react/react-paper.mp4)
+
+- **Music:** "High Technologic Beat Explosion" and "It feels good to be alive too" by
+  [Loyalty Freak Music](https://freemusicarchive.org/music/Loyalty_Freak_Music/ROBOT_DANCE_/),
+  from the album "ROBOT DANCE !", released under CC0 1.0. The covers in the videos were drawn
+  for this demo, and the lines in the lyrics bar are demo text: both tracks are instrumental.
+- **Frame rate.** These are real screen recordings, and the recorder kept about 40 of the 60
+  frames a second, so the videos are a little less smooth than the screen was. The 60 in the
+  table is the deck's own count, taken without the recorder running.
+- **Sound.** Recorded from the audio output next to the screen and lined up with a sync mark
+  shown just before each clip, then shifted by the 21 ms the speakers play late. That alignment
+  is good to about one frame.
+
+### Limits
+
+- The tempo can settle on half or double the real one, as any tempo tracker can. It only
+  changes the BPM read-out and how fast the MONO ring travels.
+- In the classic layout the spectrum terminal is cava itself, which listens on its own.
+- Watched and measured with one track on one laptop, on its speakers. With Bluetooth earbuds
+  only the analyser was run: it read a 304 ms output delay and scheduled the picture 271 ms
+  later, but nobody watched the result.
 
 ## Requirements
 
@@ -157,6 +262,7 @@ rice on
 | `rice on` / `rice off` | Turn it on, or put everything back |
 | `rice toggle` | Whichever applies. This is what the panel button runs |
 | `rice flavour NAME` | Switch flavour. No name opens the picker; `random` and `list` also work |
+| `rice react on\|off\|subtle\|full` | How much the deck and the lyrics bar move with the music |
 | `rice status` | Flavour, what is running, memory and CPU time |
 | `rice player pear\|fooyin\|auto` | Which player gets the music tile |
 | `rice layout deck\|classic` | ASCII deck, or cava and pipes |
@@ -309,7 +415,8 @@ too, until you delete it or pass `--purge`.
   and cached.
 
 That is all. No accounts, no keys, no telemetry, and it never reads a browser's or a player's
-own data.
+own data. The analyser behind the reactive deck listens to this machine's own audio output,
+keeps only a couple of seconds of numbers in memory, and sends nothing anywhere.
 
 ## Tested, and not
 
@@ -331,6 +438,10 @@ cycle were run there; the tablet pictures above were taken with the screen folde
   touchscreen and keyboard (`pen/tools/vtouch.py`); in Krita that was as a native Wayland app, where NAVIGATE picked the
   pan tool and DRAW gave the brush back. One real capacitive stylus was used by hand in
   Xournal++ and in the probe. It has not been used in Krita yet.
+- **The reactive deck** was run in all five flavours on that laptop, on its speakers; the
+  figures and the videos under [Reactive deck](#reactive-deck) were taken there. Bluetooth
+  output got as far as the analyser reading its delay. Reduced motion and `rice react off` /
+  `subtle` were checked in a hidden test compositor, not on the visible desktop.
 - Multi-monitor setups and X11 are untested.
 
 ## Credits
@@ -346,7 +457,9 @@ your distribution or downloaded from their authors, and each keeps its own licen
 | [Alacritty](https://github.com/alacritty/alacritty) | Terminal panels | Apache-2.0 / MIT |
 | [fastfetch](https://github.com/fastfetch-cli/fastfetch) | System facts in the showcase | MIT |
 | [chafa](https://hpjansson.org/chafa/) | Album art in the showcase | LGPL-3.0-or-later |
-| [cava](https://github.com/karlstav/cava) | Spectrum data and the classic visualizer | MIT |
+| [cava](https://github.com/karlstav/cava) | The classic layout's visualizer | MIT |
+| [NumPy](https://numpy.org) | The analyser behind the reactive deck | BSD-3-Clause |
+| Loyalty Freak Music, ["ROBOT DANCE !"](https://freemusicarchive.org/music/Loyalty_Freak_Music/ROBOT_DANCE_/) | Music in the demo videos (two tracks) | CC0 1.0 |
 | [cmatrix](https://github.com/abishekvashok/cmatrix) | Matrix panel | GPL-3.0 |
 | [lavat](https://github.com/AngelJumbo/lavat) | Lava panel | MIT |
 | [pipes.sh](https://github.com/pipeseroni/pipes.sh) | Pipes panel | MIT |
@@ -358,7 +471,7 @@ your distribution or downloaded from their authors, and each keeps its own licen
 | [Qt 6](https://www.qt.io) and [PySide6](https://doc.qt.io/qtforpython-6/) | Lyrics window and deck | LGPL-3.0 |
 | [Pillow](https://python-pillow.org) | Preparing cover art for the shader | MIT-CMU |
 | [KDE Plasma, KWin, Breeze](https://kde.org/plasma-desktop/) | The desktop all of this sits on | LGPL-2.0-or-later |
-| [PipeWire](https://pipewire.org) and WirePlumber | Volume control | MIT |
+| [PipeWire](https://pipewire.org) and WirePlumber | Volume control; what the analyser listens through | MIT |
 | [Rnote](https://rnote.flxzt.net), [Xournal++](https://xournalpp.github.io), [Krita](https://krita.org) | The apps pen mode sets up and switches | GPL-3.0-or-later, GPL-2.0-or-later, GPL-3.0 |
 
 ## Licence
